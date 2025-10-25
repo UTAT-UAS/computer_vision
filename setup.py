@@ -24,10 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'detector = computer_vision.detector:main',
             'detector_stream = computer_vision.detector_stream:main',
-            'detector_stream2 = computer_vision.detector_stream2:main',
-            'detector_stream3 = computer_vision.detector_stream3:main'
         ],
     },
 )

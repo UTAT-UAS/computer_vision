@@ -1,7 +1,7 @@
-import sys
-import time
 import os
+import math
 
+from scipy.spatial.transform import Rotation
 import cv2
 # from aiortc import VideoStreamTrack
 
@@ -10,91 +10,28 @@ import torch
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSPresetProfiles
 from px4_msgs.msg import VehicleLocalPosition, VehicleAttitude
-
-import argparse
-import asyncio
-import json
-import logging
-import os
-import platform
-import ssl
-import queue
-from typing import Optional
-import threading
-
-from aiohttp import web
-from aiortc import (
-    MediaStreamTrack,
-    VideoStreamTrack,
-    RTCPeerConnection,
-    RTCRtpSender,
-    RTCSessionDescription,
-)
-from aiortc.contrib.media import MediaPlayer, MediaRelay
-
-ROOT = os.path.dirname(__file__)
-
-# def create_local_tracks(play_from):
-#     player = MediaPlayer(play_from)
-#     return player.video
+from geometry_msgs.msg import Point
 
 
-async def index(request: web.Request) -> web.Response:
-    content = open(os.path.join(ROOT, "index.html"), "r").read()
-    return web.Response(content_type="text/html", text=content)
+OBJECT_SIZE = 0.8128
 
 
-async def javascript(request: web.Request) -> web.Response:
-    content = open(os.path.join(ROOT, "client.js"), "r").read()
-    return web.Response(content_type="application/javascript", text=content)
+class CircularBuffer:
+    def __init__(self, size: int = 10) -> None:
+        self.l = [None for i in range(size)]
+        self._size = size
+        self._i = 0
 
+    @property
+    def size(self) -> int:
+        return self._size
 
-async def offer(request, vqueue):
-    params = await request.json()
-    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
-    pc = RTCPeerConnection()
-    pcs.add(pc)
-
-    # open media source
-    # video = create_local_tracks("video.mp4")
-
-    pc.addTrack(vqueue)
-
-    await pc.setRemoteDescription(offer)
-
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
-
-    return web.Response(
-        content_type="application/json",
-        text=json.dumps(
-            {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
-        ),
-    )
-
-
-pcs = set()
-
-
-async def on_shutdown(app):
-    coros = [pc.close() for pc in pcs]
-    await asyncio.gather(*coros)
-    pcs.clear()
-
-
-class MyVideoTrack(VideoStreamTrack):
-    def __init__(self):
-        super().__init__()
-        self.queue = queue.Queue(10)
-
-    async def recv(self):
-        img = self.queue.get()
-        frame = VideoFrame.from_ndarray(img, format="bgr24")
-        pts, time_base = await self.next_timestamp()
-        frame.pts = pts
-        frame.time_base = time_base
-        return frame
+    def push(self, obj) -> None:
+        self.l[self._i] = obj
+        self._i += 1
+        self._i = self._i % self._size
 
 
 class Detector(Node):
@@ -104,18 +41,20 @@ class Detector(Node):
             VehicleLocalPosition,
             "/fmu/out/vehicle_local_position",
             self._position_cb,
-            10,
+            QoSPresetProfiles.SENSOR_DATA.value,
         )
         self._position = VehicleLocalPosition()
+        self._attitude_subscriber = self.create_subscription(
+            VehicleAttitude,
+            "/fmu/out/vehicle_attitude",
+            self._attitude_cb,
+            QoSPresetProfiles.SENSOR_DATA.value,
+        )
+        self._attitude = VehicleAttitude()
 
-        self._vqueue = MyVideoTrack()
-        self.app = web.Application()
-        self.app.on_shutdown.append(on_shutdown)
-        self.app.router.add_get("/", index)
-        self.app.router.add_get("/client.js", javascript)
-        self.app.router.add_post("/offer", lambda x: offer(x, self._vqueue))
-        t = threading.Thread(target=lambda: web.run_app(self.app, host="0.0.0.0", port=8080), daemon=True)
-        t.start()
+        self._position_pub = self.create_publisher(
+            Point, "/uas/cv/position", QoSPresetProfiles.SYSTEM_DEFAULT.value
+        )
 
         torch.cuda.set_device(0)
         model_path = os.path.join(os.path.dirname(__file__), "./landing_pad.pt")
@@ -134,15 +73,28 @@ class Detector(Node):
         )
         # self._video = cv2.VideoCapture(0)
         # self._video.set(cv2.CAP_PROP_BUFFERSIZE, 0)
+        self._stream = cv2.VideoWriter(
+            # "appsrc ! videoconvert ! x264enc tune=zerolatency bitrate=500 speed-preset=superfast ! rtph264pay ! udpsink host=127.0.0.1 port=5000",
+            "appsrc ! webrtcsink",
+            cv2.CAP_GSTREAMER,
+            0,
+            20,
+            (1280, 960),
+            True,
+        )
         if not self._video.isOpened():
             print("Failed to open video")
             rclpy.shutdown()
 
-        self.periodic = 0
+        self._bufferx = CircularBuffer(10)
+        self._buffery = CircularBuffer(10)
         self.create_timer(0.05, self._detect)
 
-    def _position_cb(self, msg: VehicleLocalPosition):
+    def _position_cb(self, msg: VehicleLocalPosition) -> None:
         self._position = msg
+
+    def _attitude_cb(self, msg: VehicleAttitude) -> None:
+        self._attitude = msg
 
     def _detect(self):
         ret, frame = self._video.read()
@@ -151,45 +103,70 @@ class Detector(Node):
             print("Failed to grab frame.")
             return
 
-        results = self._model.predict(frame, stream=True)
+        results = self._model.predict(frame, stream=True, verbose=False)
         for r in results:
-            image = r.plot()
+            frame = r.plot()
             original = r.orig_shape
-            cv2.line(
-                image,
-                (r.orig_shape[1] // 2, 0),
-                (r.orig_shape[1] // 2, r.orig_shape[0]),
-                (0, 0, 0),
-                1,
-            )
-            cv2.line(
-                image,
-                (0, r.orig_shape[0] // 2),
-                (
-                    r.orig_shape[1],
-                    r.orig_shape[0] // 2,
-                ),
-                (0, 0, 0),
-                1,
-            )
-            # cv2.imshow("drone_feed", image)
-            # cv2.waitKey(1)
-            # cv2.waitKey(0)
-            try:
-                self._vqueue.queue.put(image, block=False)
-            except:
-                pass
             if len(r.boxes) > 0:
                 box = list(r.boxes[0].xyxy[0].to("cpu"))
-                print(box)
-                print(original)
+                _, _, width, height = list(r.boxes[0].xywh[0].to("cpu"))
                 center = original[1] / 2, original[0] / 2
                 centroid = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-                x = centroid[0] - center[0]  # NED body frame
-                y = center[1] - centroid[1]  # NED body frame
+                x = center[1] - centroid[1]  # NED body frame
+                y = centroid[0] - center[0]  # NED body frame
+                pixels_per_meter = width / OBJECT_SIZE
+                self._bufferx.push(x / pixels_per_meter)
+                self._buffery.push(y / pixels_per_meter)
+
+                rot = Rotation.from_quat(  # PX4 is (w, x, y, z)
+                    [
+                        self._attitude.q[1],
+                        self._attitude.q[2],
+                        self._attitude.q[3],
+                        self._attitude.q[0],
+                    ]
+                )
+                rot_euler = rot.as_euler("zyx")
+                angle = rot_euler[0]
+                angle = angle + 2 * math.pi if angle < 0 else angle
+                x = self._avg_buffer(self._bufferx)
+                y = self._avg_buffer(self._buffery)
+
+                # print(math.degrees(angle))
+                rx = x * math.cos(angle) - y * math.sin(angle)
+                ry = y * math.cos(angle) + x * math.sin(angle)
+                point = Point(x=self._position.x + rx, y=self._position.y + ry)
+                self._position_pub.publish(point)
+            break
+
+        fh, fw = frame.shape[:2]  # Slicing [:2] gets only height and width
+
+        cv2.line(
+            frame,
+            (fw // 2, 0),
+            (fw // 2, fh),
+            (0, 0, 255),
+            3,
+        )
+        cv2.line(
+            frame,
+            (0, fh // 2),
+            (fw, fh // 2),
+            (0, 255, 0),
+            3,
+        )
+        self._stream.write(frame)
+
+    def _avg_buffer(self, buffer: CircularBuffer) -> float:
+        total = 0
+        for b in buffer.l:
+            if b is not None:
+                total += b
+        return float(total / buffer.size)
 
     def shut_down_cb(self):
         self._video.release()
+        self._stream.release()
 
 
 def main(args=None):
