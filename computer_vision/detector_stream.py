@@ -44,6 +44,9 @@ class Detector(Node):
             QoSPresetProfiles.SENSOR_DATA.value,
         )
         self._position = VehicleLocalPosition()
+        self._position.x = 0.0
+        self._position.y = 0.0
+        self._position.z = 0.0
         self._attitude_subscriber = self.create_subscription(
             VehicleAttitude,
             "/fmu/out/vehicle_attitude",
@@ -51,6 +54,7 @@ class Detector(Node):
             QoSPresetProfiles.SENSOR_DATA.value,
         )
         self._attitude = VehicleAttitude()
+        self._attitude.q = [-1.0, 0.0, 0.0, 0.0]
 
         self._position_pub = self.create_publisher(
             Point, "/uas/cv/position", QoSPresetProfiles.SYSTEM_DEFAULT.value
@@ -80,6 +84,7 @@ class Detector(Node):
             0,
             20,
             (1280, 960),
+            # (640, 480),
             True,
         )
         if not self._video.isOpened():
