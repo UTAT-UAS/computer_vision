@@ -3,6 +3,7 @@ from typing import Callable, Any
 import math
 from collections import deque
 from flight_stack_msgs.srv import SaveFrame, CalculateDistance
+from std_srvs.srv import SetBool
 
 import cv2
 import numpy as np
@@ -40,11 +41,13 @@ class Stream(Node):
         self._depth_max_history = deque(maxlen=30)
         self._last_depth_data = None
         self._last_depth_frame_info = None
+        self._overlay_depth = "--overlay-depth" in sys.argv
 
         self.create_service(
             CalculateDistance, "/uas/cv/calculate_distance", self._distance_callback
         )
         self.create_service(SaveFrame, "/uas/cv/save_frame", self._save_frame_callback)
+        self.create_service(SetBool, "/uas/cv/toggle_overlay_depth", self._toggle_overlay_callback)
 
         if "--simulation" in sys.argv:
             self._video = cv2.VideoCapture(
@@ -144,7 +147,7 @@ class Stream(Node):
                     return False, None
 
                 if (
-                    "--overlay-depth" in sys.argv
+                    self._overlay_depth
                     and depth_frame.get_data_size() == depth_width * depth_height * 2
                 ):
                     # Use OpenCV's built-in mask and minMaxLoc which are C++ optimized
@@ -357,6 +360,12 @@ class Stream(Node):
             response.distance = -1.0
             print(response.message)
 
+        return response
+
+    def _toggle_overlay_callback(self, request, response):
+        self._overlay_depth = request.data
+        response.success = True
+        response.message = f"Depth overlay set to {self._overlay_depth}"
         return response
 
     def shut_down_cv(self):
