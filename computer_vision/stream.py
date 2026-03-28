@@ -147,10 +147,14 @@ class Stream(Node):
                     "--overlay-depth" in sys.argv
                     and depth_frame.get_data_size() == depth_width * depth_height * 2
                 ):
-                    valid_depths = depth_data[depth_data > 0]
-                    if len(valid_depths) > 0:
-                        self._depth_min_history.append(np.min(valid_depths))
-                        self._depth_max_history.append(np.max(valid_depths))
+                    # Use OpenCV's built-in mask and minMaxLoc which are C++ optimized
+                    # cv2.compare is much faster than boolean numpy array indexing
+                    valid_mask = cv2.compare(depth_data, 0, cv2.CMP_GT)
+                    min_val, max_val, _, _ = cv2.minMaxLoc(depth_data, mask=valid_mask)
+
+                    if max_val > 0:
+                        self._depth_min_history.append(min_val)
+                        self._depth_max_history.append(max_val)
 
                     if len(self._depth_min_history) > 0:
                         avg_min = np.mean(self._depth_min_history)
@@ -158,10 +162,11 @@ class Stream(Node):
                         if avg_max <= avg_min:
                             avg_max = avg_min + 1
 
-                        clipped_depth = np.clip(depth_data, avg_min, avg_max)
-                        depth_normalized = (
-                            (clipped_depth - avg_min) / (avg_max - avg_min) * 255.0
-                        ).astype(np.uint8)
+                        # cv2.convertScaleAbs applies an affine transform and clips to 0-255 using SIMD instructions.
+                        # This avoids creating multiple python/numpy floating point arrays (which is huge memory/CPU savings)
+                        alpha_scale = 255.0 / (avg_max - avg_min)
+                        beta_scale = -avg_min * alpha_scale
+                        depth_normalized = cv2.convertScaleAbs(depth_data, alpha=alpha_scale, beta=beta_scale)
                     else:
                         depth_normalized = np.zeros(
                             (depth_height, depth_width), dtype=np.uint8
@@ -173,12 +178,14 @@ class Stream(Node):
                     )
 
                     # Make depth 0 values visually distinct (e.g., purely black)
-                    depth_colormap[depth_data == 0] = [0, 0, 0]
+                    # cv2.bitwise_and is much faster than numpy array masking assignment
+                    depth_colormap = cv2.bitwise_and(depth_colormap, depth_colormap, mask=valid_mask)
 
                     # Resize the depth colormap if its dimensions differ from color_image
                     if color_image.shape[:2] != depth_colormap.shape[:2]:
                         depth_colormap = cv2.resize(
-                            depth_colormap, (color_image.shape[1], color_image.shape[0])
+                            # Inter_nearest is faster for simple overlay scaling than Inter_linear
+                            depth_colormap, (color_image.shape[1], color_image.shape[0]), interpolation=cv2.INTER_NEAREST
                         )
 
                     # Overlay the depth map on top of the color image using simple alpha blending
