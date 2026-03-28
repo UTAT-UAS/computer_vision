@@ -2,7 +2,7 @@ import sys
 from typing import Callable, Any
 import math
 from collections import deque
-from std_msgs.msg import Int32MultiArray
+from flight_stack_msgs.srv import SaveFrame, CalculateDistance
 
 import cv2
 import numpy as np
@@ -34,13 +34,17 @@ class Stream(Node):
         self._video_read: Callable[[], tuple[bool, Any]] | None = None
         self._frame_size: tuple[int, int] | None = None
         self._frame_rate: int | None = None
-        self._frame_buffer = deque(maxlen=1000)
+        self._frame_buffer = {}  # dictionary keyed by frame_id
+        self._saved_frames = {}  # explicitly saved frames for distance calculation
         self._depth_min_history = deque(maxlen=30)
         self._depth_max_history = deque(maxlen=30)
+        self._last_depth_data = None
+        self._last_depth_frame_info = None
 
-        self.create_subscription(
-            Int32MultiArray, "calculate_distance", self._distance_callback, 10
+        self.create_service(
+            CalculateDistance, "/uas/cv/calculate_distance", self._distance_callback
         )
+        self.create_service(SaveFrame, "/uas/cv/save_frame", self._save_frame_callback)
 
         if "--simulation" in sys.argv:
             self._video = cv2.VideoCapture(
@@ -124,16 +128,14 @@ class Stream(Node):
                         depth_frame.get_data(), dtype=np.uint16
                     ).reshape(depth_height, depth_width)
 
-                    self._frame_buffer.append(
-                        {
-                            "frame_num": self.frame,
-                            "depth_data": depth_data.copy(),
-                            "depth_intrinsics": depth_intrinsics,
-                            "extrinsic": extrinsic,
-                            "depth_width": depth_width,
-                            "depth_height": depth_height,
-                        }
-                    )
+                    # store latest depth info for save_frame service
+                    self._last_depth_data = depth_data.copy()
+                    self._last_depth_frame_info = {
+                        "depth_intrinsics": depth_intrinsics,
+                        "extrinsic": extrinsic,
+                        "depth_width": depth_width,
+                        "depth_height": depth_height,
+                    }
 
                 # covert to RGB format
                 color_image = frame_to_bgr_image(color_frame)
@@ -239,6 +241,21 @@ class Stream(Node):
         self._stream.write(frame)
         self.frame += 1
 
+        if (
+            self._last_depth_data is not None
+            and self._last_depth_frame_info is not None
+        ):
+            self._frame_buffer[self.frame] = {
+                "depth_data": self._last_depth_data,
+                "depth_intrinsics": self._last_depth_frame_info["depth_intrinsics"],
+                "extrinsic": self._last_depth_frame_info["extrinsic"],
+                "depth_width": self._last_depth_frame_info["depth_width"],
+                "depth_height": self._last_depth_frame_info["depth_height"],
+            }
+            if len(self._frame_buffer) > 1000:
+                oldest_key = min(self._frame_buffer.keys())
+                del self._frame_buffer[oldest_key]
+
     def _get_3d_point(self, x, y, frame_data):
         depth_data = frame_data["depth_data"]
         depth_width = frame_data["depth_width"]
@@ -272,24 +289,33 @@ class Stream(Node):
             )
         return None
 
-    def _distance_callback(self, msg):
-        if len(msg.data) != 5:
-            print("Expected 5 values in Int32MultiArray: [frame_num, x1, y1, x2, y2]")
-            return
+    def _save_frame_callback(self, request, response):
+        target_frame = request.frame_id
 
-        target_frame, x1, y1, x2, y2 = msg.data
+        if target_frame in self._frame_buffer:
+            self._saved_frames[target_frame] = self._frame_buffer[target_frame]
+            response.success = True
+            response.message = f"Frame {target_frame} saved."
+            response.frame_id = target_frame
+        else:
+            response.success = False
+            response.message = f"Frame {target_frame} not found in buffer."
+            response.frame_id = target_frame
 
-        frame_data = None
-        for f in self._frame_buffer:
-            if f["frame_num"] == target_frame:
-                frame_data = f
-                break
+        return response
+
+    def _distance_callback(self, request, response):
+        target_frame = request.frame_id
+        x1, y1 = request.x1, request.y1
+        x2, y2 = request.x2, request.y2
+
+        frame_data = self._saved_frames.get(target_frame)
 
         if frame_data is None:
-            print(
-                f"Frame {target_frame} not found in buffer (max {self._frame_buffer.maxlen} frames)."
-            )
-            return
+            response.success = False
+            response.message = f"Frame {target_frame} not found in saved frames."
+            response.distance = -1.0
+            return response
 
         p1 = self._get_3d_point(x1, y1, frame_data)
         p2 = self._get_3d_point(x2, y2, frame_data)
@@ -298,13 +324,19 @@ class Stream(Node):
             distance = math.sqrt(
                 (p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2 + (p1.z - p2.z) ** 2
             )
+            response.success = True
+            response.message = f"Calculated distance: {distance:.2f} mm"
+            response.distance = distance
             print(
                 f"Distance between ({x1}, {y1}) and ({x2}, {y2}) at frame {target_frame}: {distance:.2f} mm"
             )
         else:
-            print(
-                f"Could not calculate distance (invalid depth for one or both points at frame {target_frame})"
-            )
+            response.success = False
+            response.message = f"Could not calculate distance (invalid depth for one or both points at frame {target_frame})"
+            response.distance = -1.0
+            print(response.message)
+
+        return response
 
     def shut_down_cv(self):
         self._video.release()
