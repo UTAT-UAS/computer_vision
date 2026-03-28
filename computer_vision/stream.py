@@ -172,6 +172,9 @@ class Stream(Node):
                         depth_normalized, cv2.COLORMAP_JET
                     )
 
+                    # Make depth 0 values visually distinct (e.g., purely black)
+                    depth_colormap[depth_data == 0] = [0, 0, 0]
+
                     # Resize the depth colormap if its dimensions differ from color_image
                     if color_image.shape[:2] != depth_colormap.shape[:2]:
                         depth_colormap = cv2.resize(
@@ -268,15 +271,26 @@ class Stream(Node):
         depth_value = depth_data[y, x]
 
         if depth_value == 0:
-            window_size = 30
-            half_window = window_size // 2
-            y_start = max(0, y - half_window)
-            y_end = min(depth_height, y + half_window + 1)
-            x_start = max(0, x - half_window)
-            x_end = min(depth_width, x + half_window + 1)
+            angles = [i * math.pi / 4 for i in range(8)]
+            non_zero_depths = []
+            max_radius = 50  # Prevent searching too far
 
-            surrounding = depth_data[y_start:y_end, x_start:x_end]
-            non_zero_depths = surrounding[surrounding > 0]
+            for angle in angles:
+                dx = math.cos(angle)
+                dy = math.sin(angle)
+
+                for r in range(1, max_radius):
+                    nx = int(round(x + r * dx))
+                    ny = int(round(y + r * dy))
+
+                    if nx < 0 or nx >= depth_width or ny < 0 or ny >= depth_height:
+                        break
+
+                    val = depth_data[ny, nx]
+                    if val > 0:
+                        non_zero_depths.append(val)
+                        break
+
             if len(non_zero_depths) > 0:
                 depth_value = np.mean(non_zero_depths)
 
