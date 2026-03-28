@@ -37,6 +37,9 @@ class CircularBuffer:
 class Detector(Node):
     def __init__(self):
         super().__init__("Detector")
+
+        self.frame = 0
+
         self._position_sub = self.create_subscription(
             VehicleLocalPosition,
             "/fmu/out/vehicle_local_position",
@@ -79,7 +82,7 @@ class Detector(Node):
         # self._video.set(cv2.CAP_PROP_BUFFERSIZE, 0)
         self._stream = cv2.VideoWriter(
             # "appsrc ! videoconvert ! x264enc tune=zerolatency bitrate=500 speed-preset=superfast ! rtph264pay ! udpsink host=127.0.0.1 port=5000",
-            "appsrc ! webrtcsink",
+            'appsrc ! timecodestamper ! webrtcsink forward-metas="timecode" name=ws enable-control-data-channel=true',
             cv2.CAP_GSTREAMER,
             0,
             20,
@@ -160,6 +163,9 @@ class Detector(Node):
             (0, 255, 0),
             3,
         )
+
+        print(f"Frame {self.frame}")
+        self.frame += 1
         self._stream.write(frame)
 
     def _avg_buffer(self, buffer: CircularBuffer) -> float:
@@ -169,7 +175,7 @@ class Detector(Node):
                 total += b
         return float(total / buffer.size)
 
-    def shut_down_cb(self):
+    def shut_down_cv(self):
         self._video.release()
         self._stream.release()
 
@@ -179,7 +185,7 @@ def main(args=None):
     detector = Detector()
     rclpy.spin(detector)
 
-    detector.shut_down_cb()
+    detector.shut_down_cv()
     cv2.destroyAllWindows()
     detector.destroy_node()
     rclpy.shutdown()
