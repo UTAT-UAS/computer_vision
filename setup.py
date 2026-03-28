@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'detector_stream = computer_vision.detector_stream:main',
+            'stream = computer_vision.stream:main',
         ],
     },
 )
