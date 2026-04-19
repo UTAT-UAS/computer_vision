@@ -14,6 +14,7 @@ import torch
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 
 from pyorbbecsdk import (  # pylint: disable=no-name-in-module
     Config,
@@ -79,8 +80,8 @@ class Stream(Node):
             print(f"Failed to load YOLO engine: {e}")
             self._model = None
 
-        self.create_subscription(ManualControlSetpoint, '/fmu/out/manual_control_setpoint', self._servo_callback, 10)
-        self.create_subscription(ManualControlSetpoint, '/fmu/in/manual_control_input', self._servo_callback, 10)
+        self.create_subscription(ManualControlSetpoint, '/fmu/out/manual_control_setpoint', self._servo_callback, qos_profile_sensor_data)
+        self.create_subscription(ManualControlSetpoint, '/fmu/in/manual_control_input', self._servo_callback, qos_profile_sensor_data)
 
         self.create_service(
             CalculateDistance, "/uas/cv/calculate_distance", self._distance_callback
