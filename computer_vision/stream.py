@@ -4,6 +4,7 @@ import math
 from collections import deque
 from flight_stack_msgs.srv import SaveFrame, CalculateDistance
 from std_srvs.srv import SetBool
+from px4_msgs.msg import ActuatorServos
 
 import cv2
 import numpy as np
@@ -29,6 +30,19 @@ class Stream(Node):
     def __init__(self):
         super().__init__("Stream")
 
+        self.declare_parameter("cam_pos_n", 0.0)
+        self.declare_parameter("cam_pos_e", 0.0)
+        self.declare_parameter("cam_pos_d", 0.0)
+        self.declare_parameter("cam_pitch", 0.0)
+        
+        self.declare_parameter("pump_pos_n", 0.0)
+        self.declare_parameter("pump_pos_e", 0.0)
+        self.declare_parameter("pump_pos_d", 0.0)
+        
+        self.declare_parameter("nozzle_length", 0.1)
+        self.declare_parameter("parabola_a", 0.05)
+        self.declare_parameter("dist_threshold", 100.0)
+        
         self.frame = 0
 
         self._video = None
@@ -42,6 +56,9 @@ class Stream(Node):
         self._last_depth_data = None
         self._last_depth_frame_info = None
         self._overlay_depth = "--overlay-depth" in sys.argv
+
+        self._pump_angle = 0
+        self.create_subscription(ActuatorServos, '/uas/test/servo', self._servo_callback, 10)
 
         self.create_service(
             CalculateDistance, "/uas/cv/calculate_distance", self._distance_callback
@@ -229,6 +246,101 @@ class Stream(Node):
         height, width = frame.shape[:2]
         center_x, center_y = width // 2, height // 2
 
+        # Draw actual hit projection
+        if self._last_depth_data is not None and self._last_depth_frame_info is not None:
+            depth_data = self._last_depth_data
+            depth_w = self._last_depth_frame_info["depth_width"]
+            depth_h = self._last_depth_frame_info["depth_height"]
+            intrinsics = self._last_depth_frame_info["depth_intrinsics"]
+            extrinsic = self._last_depth_frame_info["extrinsic"]
+            
+            cam_n = self.get_parameter("cam_pos_n").value
+            cam_e = self.get_parameter("cam_pos_e").value
+            cam_d = self.get_parameter("cam_pos_d").value
+            cam_pitch = self.get_parameter("cam_pitch").value
+            
+            pump_n = self.get_parameter("pump_pos_n").value
+            pump_e = self.get_parameter("pump_pos_e").value
+            pump_d = self.get_parameter("pump_pos_d").value
+            nozzle_length = self.get_parameter("nozzle_length").value
+            
+            parabola_a = self.get_parameter("parabola_a").value
+            dist_threshold = self.get_parameter("dist_threshold").value
+
+            # Target pixels: 10 pixels wide slice at center
+            slice_w = 10
+            x_start = max(0, (depth_w // 2) - (slice_w // 2))
+            x_end = min(depth_w, x_start + slice_w)
+
+            # Collect depth pixels and convert to Drone Body NED
+            ned_points = []
+            pixel_coords = []
+            for y in range(depth_h):
+                for x in range(x_start, x_end):
+                    d_val = depth_data[y, x]
+                    if d_val > 0:
+                        pt_3d = transformation2dto3d(OBPoint2f(float(x), float(y)), float(d_val), intrinsics, extrinsic)
+                        opt_x, opt_y, opt_z = pt_3d.x / 1000.0, pt_3d.y / 1000.0, pt_3d.z / 1000.0
+                        
+                        n_pt = opt_z * math.cos(cam_pitch) + opt_y * math.sin(cam_pitch) + cam_n
+                        e_pt = opt_x + cam_e
+                        d_pt = opt_y * math.cos(cam_pitch) - opt_z * math.sin(cam_pitch) + cam_d
+                        
+                        ned_points.append([n_pt, e_pt, d_pt])
+                        pixel_coords.append((x, y))
+            
+            matched_pixels = []
+            if len(ned_points) > 0:
+                pts_ned = np.array(ned_points)
+
+                # Gradient descent approximation for closest point on water path
+                t_m = 5.0  # Start ~3m out
+                step = 3.0 # Initial search step size in meters
+
+                for _ in range(10):
+                    t_cands = [max(0.0, t_m - step), t_m, t_m + step]
+                    min_dists = []
+                    for t in t_cands:
+                        dx = t * math.cos(self._pump_angle)
+                        dz = parabola_a * (dx**2) - dx * math.tan(self._pump_angle)
+                        pn = pump_n + nozzle_length * math.cos(self._pump_angle) + dx
+                        pe = pump_e
+                        pd = pump_d - nozzle_length * math.sin(self._pump_angle) + dz
+                        
+                        pt_traj = np.array([pn, pe, pd])
+                        # Distance to all points
+                        dist = np.min(np.linalg.norm(pts_ned - pt_traj, axis=1))
+                        min_dists.append(dist)
+                    
+                    # Update t_m to the best candidate
+                    best_idx = np.argmin(min_dists)
+                    t_m = t_cands[best_idx]
+                    
+                    # Reduce step size for next iteration
+                    step *= 0.5
+                
+                # Find all points within threshold using the final best t_m
+                dx = t_m * math.cos(self._pump_angle)
+                dz = parabola_a * (dx**2) - dx * math.tan(self._pump_angle)
+                pn = pump_n + nozzle_length * math.cos(self._pump_angle) + dx
+                pe = pump_e
+                pd = pump_d - nozzle_length * math.sin(self._pump_angle) + dz
+                best_traj_pt = np.array([pn, pe, pd])
+                
+                dists = np.linalg.norm(pts_ned - best_traj_pt, axis=1)
+                valid_indices = np.where(dists <= (dist_threshold / 1000.0))[0]
+                
+                scale_x = width / depth_w
+                scale_y = height / depth_h
+                for idx in valid_indices:
+                    x, y = pixel_coords[idx]
+                    c_x = int(x * scale_x)
+                    c_y = int(y * scale_y)
+                    matched_pixels.append((c_x, c_y))
+            
+            for (cx, cy) in matched_pixels:
+                cv2.drawMarker(frame, (cx, cy), (255, 255, 0), cv2.MARKER_CROSS, 2, 1)
+
         # Crosshair parameters
         crosshair_length = 20
         crosshair_color = (0, 255, 0)  # Green
@@ -367,6 +479,10 @@ class Stream(Node):
         response.success = True
         response.message = f"Depth overlay set to {self._overlay_depth}"
         return response
+
+    def _servo_callback(self, msg: ActuatorServos):
+        if len(msg.control) > 0 and not math.isnan(msg.control[0]):
+            self._pump_angle = msg.control[0] * math.radians(32.0)
 
     def shut_down_cv(self):
         self._video.release()
