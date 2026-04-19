@@ -22,6 +22,7 @@ from pyorbbecsdk import (  # pylint: disable=no-name-in-module
     OBSensorType,
     OBFormat,
     OBError,
+    OBPropertyID,
     VideoStreamProfile,
     transformation2dto3d,
     OBPoint2f,
@@ -59,11 +60,18 @@ class Stream(Node):
         self._last_depth_data = None
         self._last_depth_frame_info = None
         self._overlay_depth = "--overlay-depth" in sys.argv
+        self._flip = "--flip" in sys.argv
 
         self._pump_angle = 0
 
         # Load YOLO model
-        model_path = os.path.join(os.path.dirname(__file__), "./best.engine")
+        model_path = ""
+        if torch.cuda.is_available():
+            print("CUDA is available. Attempting to load TensorRT engine.")
+            model_path = os.path.join(os.path.dirname(__file__), "./best.engine")
+        else:
+            print("CUDA not available. Loading standard PyTorch model.")
+            model_path = os.path.join(os.path.dirname(__file__), "./best.pt")
         try:
             # TensorRT models (.engine) natively run on the GPU they were compiled for.
             self._model = YOLO(model_path, task='detect')
@@ -95,6 +103,14 @@ class Stream(Node):
             config = Config()
             pipeline = Pipeline()
             try:
+                device = pipeline.get_device()
+                if self._flip:
+                    try:
+                        device.set_int_property(OBPropertyID.OB_PROP_COLOR_ROTATE_INT, 180)
+                        device.set_int_property(OBPropertyID.OB_PROP_DEPTH_ROTATE_INT, 180)
+                    except OBError as e:
+                        print("Failed to set rotation properties:", e)
+
                 profile_list = pipeline.get_stream_profile_list(
                     OBSensorType.COLOR_SENSOR
                 )
