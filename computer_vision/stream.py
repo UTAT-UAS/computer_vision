@@ -5,7 +5,7 @@ import math
 from collections import deque
 from flight_stack_msgs.srv import SaveFrame, CalculateDistance
 from std_srvs.srv import SetBool
-from px4_msgs.msg import ActuatorServos
+from px4_msgs.msg import ManualControlSetpoint
 from ultralytics import YOLO
 
 import cv2
@@ -34,16 +34,16 @@ class Stream(Node):
     def __init__(self):
         super().__init__("Stream")
 
-        self.declare_parameter("cam_pos_n", 0.0)
+        self.declare_parameter("cam_pos_n", 0.26)
         self.declare_parameter("cam_pos_e", 0.0)
-        self.declare_parameter("cam_pos_d", 0.0)
+        self.declare_parameter("cam_pos_d", 0.055)
         self.declare_parameter("cam_pitch", 0.0)
         
-        self.declare_parameter("pump_pos_n", 0.0)
+        self.declare_parameter("pump_pos_n", 0.22)
         self.declare_parameter("pump_pos_e", 0.0)
-        self.declare_parameter("pump_pos_d", 0.0)
+        self.declare_parameter("pump_pos_d", 0.15)
         
-        self.declare_parameter("nozzle_length", 0.1)
+        self.declare_parameter("nozzle_length", 0.05)
         self.declare_parameter("parabola_a", 0.05)
         self.declare_parameter("dist_threshold", 100.0)
         
@@ -79,7 +79,8 @@ class Stream(Node):
             print(f"Failed to load YOLO engine: {e}")
             self._model = None
 
-        self.create_subscription(ActuatorServos, '/uas/test/servo', self._servo_callback, 10)
+        self.create_subscription(ManualControlSetpoint, '/fmu/out/manual_control_setpoint', self._servo_callback, 10)
+        self.create_subscription(ManualControlSetpoint, '/fmu/in/manual_control_input', self._servo_callback, 10)
 
         self.create_service(
             CalculateDistance, "/uas/cv/calculate_distance", self._distance_callback
@@ -389,7 +390,7 @@ class Stream(Node):
                     matched_pixels.append((c_x, c_y))
             
             for (cx, cy) in matched_pixels:
-                cv2.drawMarker(frame, (cx, cy), (255, 255, 0), cv2.MARKER_CROSS, 2, 1)
+                cv2.drawMarker(frame, (cx, cy), (255, 255, 0), cv2.MARKER_CROSS, 6, 1)
 
         # Crosshair parameters
         crosshair_length = 20
@@ -530,9 +531,9 @@ class Stream(Node):
         response.message = f"Depth overlay set to {self._overlay_depth}"
         return response
 
-    def _servo_callback(self, msg: ActuatorServos):
-        if len(msg.control) > 0 and not math.isnan(msg.control[0]):
-            self._pump_angle = msg.control[0] * math.radians(32.0)
+    def _servo_callback(self, msg: ManualControlSetpoint):
+        if not math.isnan(msg.aux3):
+            self._pump_angle = msg.aux3 * math.radians(32.0)
 
     def shut_down_cv(self):
         self._video.release()
