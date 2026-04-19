@@ -284,45 +284,65 @@ class Stream(Node):
             parabola_a = self.get_parameter("parabola_a").value
             dist_threshold = self.get_parameter("dist_threshold").value
 
+            # Precompute trigonometric constants
+            cos_cam_pitch = math.cos(cam_pitch)
+            sin_cam_pitch = math.sin(cam_pitch)
+            cos_pump = math.cos(self._pump_angle)
+            sin_pump = math.sin(self._pump_angle)
+            tan_pump = math.tan(self._pump_angle)
+
             # Target pixels: 10 pixels wide slice at center
             slice_w = 10
             x_start = max(0, (depth_w // 2) - (slice_w // 2))
             x_end = min(depth_w, x_start + slice_w)
 
-            # Collect depth pixels and convert to Drone Body NED
-            ned_points = []
+            # Collect depth pixels and extract 3D coords
+            pts_3d_raw = []
             pixel_coords = []
             for y in range(depth_h):
                 for x in range(x_start, x_end):
                     d_val = depth_data[y, x]
                     if d_val > 0:
                         pt_3d = transformation2dto3d(OBPoint2f(float(x), float(y)), float(d_val), intrinsics, extrinsic)
-                        opt_x, opt_y, opt_z = pt_3d.x / 1000.0, pt_3d.y / 1000.0, pt_3d.z / 1000.0
-                        
-                        n_pt = opt_z * math.cos(cam_pitch) + opt_y * math.sin(cam_pitch) + cam_n
-                        e_pt = opt_x + cam_e
-                        d_pt = opt_y * math.cos(cam_pitch) - opt_z * math.sin(cam_pitch) + cam_d
-                        
-                        ned_points.append([n_pt, e_pt, d_pt])
+                        pts_3d_raw.append([pt_3d.x / 1000.0, pt_3d.y / 1000.0, pt_3d.z / 1000.0])
                         pixel_coords.append((x, y))
             
             matched_pixels = []
-            if len(ned_points) > 0:
-                pts_ned = np.array(ned_points)
+            if len(pts_3d_raw) > 0:
+                pts_3d_arr = np.array(pts_3d_raw)
+                
+                # Vectorize NED transformation
+                opt_x = pts_3d_arr[:, 0]
+                opt_y = pts_3d_arr[:, 1]
+                opt_z = pts_3d_arr[:, 2]
+                
+                n_pt = opt_z * cos_cam_pitch + opt_y * sin_cam_pitch + cam_n
+                e_pt = opt_x + cam_e
+                d_pt = opt_y * cos_cam_pitch - opt_z * sin_cam_pitch + cam_d
+                
+                pts_ned = np.column_stack((n_pt, e_pt, d_pt))
 
                 # Gradient descent approximation for closest point on water path
                 t_m = 5.0  # Start ~3m out
                 step = 3.0 # Initial search step size in meters
 
+                pump_offset_n = pump_n + nozzle_length * cos_pump
+                pump_offset_d = pump_d - nozzle_length * sin_pump
+
                 for _ in range(10):
+                    if step < 0.05:  # Early termination
+                        break
+                        
                     t_cands = [max(0.0, t_m - step), t_m, t_m + step]
                     min_dists = []
+                    
+                    # Evaluate trajectory points
                     for t in t_cands:
-                        dx = t * math.cos(self._pump_angle)
-                        dz = parabola_a * (dx**2) - dx * math.tan(self._pump_angle)
-                        pn = pump_n + nozzle_length * math.cos(self._pump_angle) + dx
+                        dx = t * cos_pump
+                        dz = parabola_a * (dx**2) - dx * tan_pump
+                        pn = pump_offset_n + dx
                         pe = pump_e
-                        pd = pump_d - nozzle_length * math.sin(self._pump_angle) + dz
+                        pd = pump_offset_d + dz
                         
                         pt_traj = np.array([pn, pe, pd])
                         # Distance to all points
@@ -337,12 +357,9 @@ class Stream(Node):
                     step *= 0.5
                 
                 # Find all points within threshold using the final best t_m
-                dx = t_m * math.cos(self._pump_angle)
-                dz = parabola_a * (dx**2) - dx * math.tan(self._pump_angle)
-                pn = pump_n + nozzle_length * math.cos(self._pump_angle) + dx
-                pe = pump_e
-                pd = pump_d - nozzle_length * math.sin(self._pump_angle) + dz
-                best_traj_pt = np.array([pn, pe, pd])
+                dx = t_m * cos_pump
+                dz = parabola_a * (dx**2) - dx * tan_pump
+                best_traj_pt = np.array([pump_offset_n + dx, pump_e, pump_offset_d + dz])
                 
                 dists = np.linalg.norm(pts_ned - best_traj_pt, axis=1)
                 valid_indices = np.where(dists <= (dist_threshold / 1000.0))[0]
