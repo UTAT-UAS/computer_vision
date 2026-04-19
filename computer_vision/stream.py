@@ -1,13 +1,16 @@
 import sys
+import os
 from typing import Callable, Any
 import math
 from collections import deque
 from flight_stack_msgs.srv import SaveFrame, CalculateDistance
 from std_srvs.srv import SetBool
 from px4_msgs.msg import ActuatorServos
+from ultralytics import YOLO
 
 import cv2
 import numpy as np
+import torch
 
 import rclpy
 from rclpy.node import Node
@@ -58,6 +61,16 @@ class Stream(Node):
         self._overlay_depth = "--overlay-depth" in sys.argv
 
         self._pump_angle = 0
+
+        # Load YOLO model
+        model_path = os.path.join(os.path.dirname(__file__), "./best.engine")
+        try:
+            # TensorRT models (.engine) natively run on the GPU they were compiled for.
+            self._model = YOLO(model_path, task='detect')
+        except Exception as e:
+            print(f"Failed to load YOLO engine: {e}")
+            self._model = None
+
         self.create_subscription(ActuatorServos, '/uas/test/servo', self._servo_callback, 10)
 
         self.create_service(
@@ -241,6 +254,10 @@ class Stream(Node):
         if not ret:
             print("Failed to grab frame.")
             return
+
+        if self._model is not None:
+            results = self._model(frame, verbose=False)
+            frame = results[0].plot()
 
         # Draw crosshair at the center
         height, width = frame.shape[:2]
