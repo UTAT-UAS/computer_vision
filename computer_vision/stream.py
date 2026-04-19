@@ -308,7 +308,7 @@ class Stream(Node):
             tan_pump = math.tan(self._pump_angle)
 
             # Target pixels: 10 pixels wide slice at center
-            slice_w = 10
+            slice_w = 4
             x_start = max(0, (depth_w // 2) - (slice_w // 2))
             x_end = min(depth_w, x_start + slice_w)
 
