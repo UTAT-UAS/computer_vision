@@ -353,7 +353,7 @@ class Stream(Node):
                 pts_ned = np.column_stack((n_pt, e_pt, d_pt))
 
                 # Gradient descent approximation for closest point on water path
-                t_m = 5.0  # Start ~3m out
+                t_m = 5.0  # Start ~5m out
                 step = 3.0 # Initial search step size in meters
 
                 pump_offset_n = pump_n + nozzle_length * cos_pump
@@ -386,13 +386,14 @@ class Stream(Node):
                     # Reduce step size for next iteration
                     step *= 0.5
                 
-                # Find all points within threshold using the final best t_m
+                # Find the 10 closest points using the final best t_m
                 dx = t_m * cos_pump
                 dz = parabola_a * (dx**2) - dx * tan_pump
                 best_traj_pt = np.array([pump_offset_n + dx, pump_e, pump_offset_d + dz])
                 
                 dists = np.linalg.norm(pts_ned - best_traj_pt, axis=1)
-                valid_indices = np.where(dists <= (dist_threshold / 1000.0))[0]
+                num_points = min(10, len(dists))
+                valid_indices = np.argsort(dists)[:num_points]
                 
                 scale_x = width / depth_w
                 scale_y = height / depth_h
