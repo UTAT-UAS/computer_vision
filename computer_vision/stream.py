@@ -5,6 +5,7 @@ import math
 from collections import deque
 from flight_stack_msgs.srv import SaveFrame, CalculateDistance
 from std_srvs.srv import SetBool
+from std_msgs.msg import Float32
 from px4_msgs.msg import ManualControlSetpoint
 from ultralytics import YOLO
 
@@ -45,8 +46,8 @@ class Stream(Node):
         self.declare_parameter("pump_pos_d", 0.15)
         
         self.declare_parameter("nozzle_length", 0.05)
-        self.declare_parameter("parabola_a", 0.05)
-        self.declare_parameter("dist_threshold", 100.0)
+        self.declare_parameter("parabola_a", 0.03)
+        self.declare_parameter("dist_threshold", 150.0)
         
         self.frame = 0
 
@@ -82,6 +83,8 @@ class Stream(Node):
 
         self.create_subscription(ManualControlSetpoint, '/fmu/out/manual_control_setpoint', self._servo_callback, qos_profile_sensor_data)
         self.create_subscription(ManualControlSetpoint, '/fmu/in/manual_control_input', self._servo_callback, qos_profile_sensor_data)
+
+        self._x_error_pub = self.create_publisher(Float32, '/uas/cv/x_error', 10)
 
         self.create_service(
             CalculateDistance, "/uas/cv/calculate_distance", self._distance_callback
@@ -273,13 +276,22 @@ class Stream(Node):
             print("Failed to grab frame.")
             return
 
-        if self._model is not None:
-            results = self._model(frame, verbose=False)
-            frame = results[0].plot()
-
         # Draw crosshair at the center
         height, width = frame.shape[:2]
         center_x, center_y = width // 2, height // 2
+
+        if self._model is not None:
+            results = list(self._model(frame, conf=0.4, stream=True, verbose=False))
+            frame = results[0].plot()
+            if len(results[0].boxes) > 0:
+                box = results[0].boxes[0]
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                obj_center_x = (x1 + x2) / 2.0
+                x_error = float(obj_center_x - center_x)
+                
+                msg = Float32()
+                msg.data = x_error
+                self._x_error_pub.publish(msg)
 
         # Draw actual hit projection
         if self._last_depth_data is not None and self._last_depth_frame_info is not None:
@@ -309,7 +321,7 @@ class Stream(Node):
             sin_pump = math.sin(self._pump_angle)
             tan_pump = math.tan(self._pump_angle)
 
-            # Target pixels: 10 pixels wide slice at center
+            # Target pixels: 4 pixels wide slice at center
             slice_w = 4
             x_start = max(0, (depth_w // 2) - (slice_w // 2))
             x_end = min(depth_w, x_start + slice_w)
@@ -391,7 +403,7 @@ class Stream(Node):
                     matched_pixels.append((c_x, c_y))
             
             for (cx, cy) in matched_pixels:
-                cv2.drawMarker(frame, (cx, cy), (255, 255, 0), cv2.MARKER_CROSS, 6, 1)
+                cv2.drawMarker(frame, (cx, cy), (255, 255, 0), cv2.MARKER_CROSS, 10, 1)
 
         # Crosshair parameters
         crosshair_length = 20
