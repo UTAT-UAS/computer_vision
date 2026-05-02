@@ -46,7 +46,7 @@ class Stream(Node):
         self.declare_parameter("pump_pos_d", 0.15)
         
         self.declare_parameter("nozzle_length", 0.05)
-        self.declare_parameter("parabola_a", 0.03)
+        self.declare_parameter("v_0", 10.0)
         self.declare_parameter("dist_threshold", 150.0)
         
         self.frame = 0
@@ -311,7 +311,7 @@ class Stream(Node):
             pump_d = self.get_parameter("pump_pos_d").value
             nozzle_length = self.get_parameter("nozzle_length").value
             
-            parabola_a = self.get_parameter("parabola_a").value
+            v_0 = self.get_parameter("v_0").value
             dist_threshold = self.get_parameter("dist_threshold").value
 
             # Precompute trigonometric constants
@@ -368,9 +368,9 @@ class Stream(Node):
                     
                     # Evaluate trajectory points
                     for t in t_cands:
-                        dx = t * cos_pump
-                        dz = parabola_a * (dx**2) - dx * tan_pump
-                        pn = pump_offset_n + dx
+                        dx = v_0 * t * math.cos(self._pump_angle)
+                        dz = -v_0 * t * math.sin(self._pump_angle) + 0.5 * 9.8 * (t**2)
+                        pn = pump_n + nozzle_length * math.cos(self._pump_angle) + dx
                         pe = pump_e
                         pd = pump_offset_d + dz
                         
@@ -386,10 +386,13 @@ class Stream(Node):
                     # Reduce step size for next iteration
                     step *= 0.5
                 
-                # Find the 10 closest points using the final best t_m
-                dx = t_m * cos_pump
-                dz = parabola_a * (dx**2) - dx * tan_pump
-                best_traj_pt = np.array([pump_offset_n + dx, pump_e, pump_offset_d + dz])
+                # Find all points within threshold using the final best t_m
+                dx = v_0 * t_m * math.cos(self._pump_angle)
+                dz = -v_0 * t_m * math.sin(self._pump_angle) + 0.5 * 9.8 * (t_m**2)
+                pn = pump_n + nozzle_length * math.cos(self._pump_angle) + dx
+                pe = pump_e
+                pd = pump_d - nozzle_length * math.sin(self._pump_angle) + dz
+                best_traj_pt = np.array([pn, pe, pd])
                 
                 dists = np.linalg.norm(pts_ned - best_traj_pt, axis=1)
                 num_points = min(10, len(dists))
