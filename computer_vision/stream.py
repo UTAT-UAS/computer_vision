@@ -596,8 +596,12 @@ class Stream(Node):
             # No solution found, return current angle
             return self._pump_angle
 
+        # Clamp angles to -32deg to 32deg
+        angle_limit_rad = math.radians(32.0)
+        clamped_angles = [max(-angle_limit_rad, min(angle_limit_rad, a)) for a in angles]
+
         # Choose the angle closest to the current pump angle
-        best_angle = min(angles, key=lambda a: abs(a - self._pump_angle))
+        best_angle = min(clamped_angles, key=lambda a: abs(a - self._pump_angle))
 
         return best_angle
 
