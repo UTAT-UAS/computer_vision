@@ -92,167 +92,103 @@ class Stream(Node):
         self.create_service(SaveFrame, "/uas/cv/save_frame", self._save_frame_callback)
         self.create_service(SetBool, "/uas/cv/toggle_overlay_depth", self._toggle_overlay_callback)
 
-        if "--simulation" in sys.argv:
-            self._video = cv2.VideoCapture(
-                "udpsrc port=5600 ! application/x-rtp,payload=96,encoding-name=H264 ! rtpjitterbuffer mode=1 ! rtph264depay ! h264parse ! decodebin ! videoconvert ! appsink drop=true sync=false",
-                cv2.CAP_GSTREAMER,
+        config = Config()
+        pipeline = Pipeline()
+        try:
+            device = pipeline.get_device()
+            if self._flip:
+                try:
+                    device.set_int_property(OBPropertyID.OB_PROP_COLOR_ROTATE_INT, 180)
+                    device.set_int_property(OBPropertyID.OB_PROP_DEPTH_ROTATE_INT, 180)
+                except OBError as e:
+                    print("Failed to set rotation properties:", e)
+
+            profile_list = pipeline.get_stream_profile_list(
+                OBSensorType.COLOR_SENSOR
             )
-            self._frame_size = (1280, 960)
-            self._frame_rate = 20
-        elif "--webcam" in sys.argv:
-            self._video = cv2.VideoCapture(0)
-            self._video.set(cv2.CAP_PROP_BUFFERSIZE, 0)
-            self._frame_size = (640, 480)
-            self._frame_rate = 20
-        elif "--depth" in sys.argv:
-            config = Config()
-            pipeline = Pipeline()
             try:
-                device = pipeline.get_device()
-                if self._flip:
-                    try:
-                        device.set_int_property(OBPropertyID.OB_PROP_COLOR_ROTATE_INT, 180)
-                        device.set_int_property(OBPropertyID.OB_PROP_DEPTH_ROTATE_INT, 180)
-                    except OBError as e:
-                        print("Failed to set rotation properties:", e)
-
-                profile_list = pipeline.get_stream_profile_list(
-                    OBSensorType.COLOR_SENSOR
+                color_profile: VideoStreamProfile = (
+                    profile_list.get_video_stream_profile(
+                        1280, 800, OBFormat.RGB, 30
+                    )
                 )
-                try:
-                    color_profile: VideoStreamProfile = (
-                        profile_list.get_video_stream_profile(
-                            1280, 800, OBFormat.RGB, 30
-                        )
-                    )
-                except OBError as e:
-                    print(e)
-                    color_profile = profile_list.get_default_video_stream_profile()
-                print("color profile: ", color_profile)
-                config.enable_stream(color_profile)
-
-                # Enable depth sensor
-                depth_profile_list = pipeline.get_stream_profile_list(
-                    OBSensorType.DEPTH_SENSOR
-                )
-                try:
-                    depth_profile: VideoStreamProfile = (
-                        depth_profile_list.get_video_stream_profile(
-                            1280, 800, OBFormat.Y16, 30
-                        )
-                    )
-                except OBError as e:
-                    print(e)
-                    depth_profile = (
-                        depth_profile_list.get_default_video_stream_profile()
-                    )
-                print("depth profile: ", depth_profile)
-                config.enable_stream(depth_profile)
-
-            except Exception as e:
+            except OBError as e:
                 print(e)
-                return
-            pipeline.start(config)
+                color_profile = profile_list.get_default_video_stream_profile()
+            print("color profile: ", color_profile)
+            config.enable_stream(color_profile)
 
-            def read_orbbec_frame():
-                frames: FrameSet = pipeline.wait_for_frames(1000)
-                if frames is None:
-                    return False, None
-                color_frame = frames.get_color_frame()
-                depth_frame = frames.get_depth_frame()
-
-                if color_frame is None or depth_frame is None:
-                    return False, None
-
-                # Get central 3D coordinate
-                depth_width = depth_frame.get_width()
-                depth_height = depth_frame.get_height()
-
-                if depth_frame.get_data_size() == depth_width * depth_height * 2:
-                    color_stream_profile = color_frame.get_stream_profile()
-                    depth_stream_profile = depth_frame.get_stream_profile()
-                    depth_intrinsics = (
-                        depth_stream_profile.as_video_stream_profile().get_intrinsic()
+            # Enable depth sensor
+            depth_profile_list = pipeline.get_stream_profile_list(
+                OBSensorType.DEPTH_SENSOR
+            )
+            try:
+                depth_profile: VideoStreamProfile = (
+                    depth_profile_list.get_video_stream_profile(
+                        1280, 800, OBFormat.Y16, 30
                     )
-                    extrinsic = depth_stream_profile.get_extrinsic_to(
-                        color_stream_profile
-                    )
+                )
+            except OBError as e:
+                print(e)
+                depth_profile = (
+                    depth_profile_list.get_default_video_stream_profile()
+                )
+            print("depth profile: ", depth_profile)
+            config.enable_stream(depth_profile)
 
-                    depth_data = np.frombuffer(
-                        depth_frame.get_data(), dtype=np.uint16
-                    ).reshape(depth_height, depth_width)
+        except Exception as e:
+            print(e)
+            return
+        pipeline.start(config)
 
-                    # store latest depth info for save_frame service
-                    self._last_depth_data = depth_data.copy()
-                    self._last_depth_frame_info = {
-                        "depth_intrinsics": depth_intrinsics,
-                        "extrinsic": extrinsic,
-                        "depth_width": depth_width,
-                        "depth_height": depth_height,
-                    }
+        def read_orbbec_frame():
+            frames: FrameSet = pipeline.wait_for_frames(1000)
+            if frames is None:
+                return False, None
+            color_frame = frames.get_color_frame()
+            depth_frame = frames.get_depth_frame()
 
-                # covert to RGB format
-                color_image = frame_to_bgr_image(color_frame)
-                if color_image is None:
-                    print("failed to convert frame to image")
-                    return False, None
+            if color_frame is None or depth_frame is None:
+                return False, None
 
-                if (
-                    self._overlay_depth
-                    and depth_frame.get_data_size() == depth_width * depth_height * 2
-                ):
-                    # Use OpenCV's built-in mask and minMaxLoc which are C++ optimized
-                    # cv2.compare is much faster than boolean numpy array indexing
-                    valid_mask = cv2.compare(depth_data, 0, cv2.CMP_GT)
-                    min_val, max_val, _, _ = cv2.minMaxLoc(depth_data, mask=valid_mask)
+            # Get central 3D coordinate
+            depth_width = depth_frame.get_width()
+            depth_height = depth_frame.get_height()
 
-                    if max_val > 0:
-                        self._depth_min_history.append(min_val)
-                        self._depth_max_history.append(max_val)
+            if depth_frame.get_data_size() == depth_width * depth_height * 2:
+                color_stream_profile = color_frame.get_stream_profile()
+                depth_stream_profile = depth_frame.get_stream_profile()
+                depth_intrinsics = (
+                    depth_stream_profile.as_video_stream_profile().get_intrinsic()
+                )
+                extrinsic = depth_stream_profile.get_extrinsic_to(
+                    color_stream_profile
+                )
 
-                    if len(self._depth_min_history) > 0:
-                        avg_min = np.mean(self._depth_min_history)
-                        avg_max = np.mean(self._depth_max_history)
-                        if avg_max <= avg_min:
-                            avg_max = avg_min + 1
+                depth_data = np.frombuffer(
+                    depth_frame.get_data(), dtype=np.uint16
+                ).reshape(depth_height, depth_width)
 
-                        # cv2.convertScaleAbs applies an affine transform and clips to 0-255 using SIMD instructions.
-                        # This avoids creating multiple python/numpy floating point arrays (which is huge memory/CPU savings)
-                        alpha_scale = 255.0 / (avg_max - avg_min)
-                        beta_scale = -avg_min * alpha_scale
-                        depth_normalized = cv2.convertScaleAbs(depth_data, alpha=alpha_scale, beta=beta_scale)
-                    else:
-                        depth_normalized = np.zeros(
-                            (depth_height, depth_width), dtype=np.uint8
-                        )
+                # store latest depth info for save_frame service
+                self._last_depth_data = depth_data.copy()
+                self._last_depth_frame_info = {
+                    "depth_intrinsics": depth_intrinsics,
+                    "extrinsic": extrinsic,
+                    "depth_width": depth_width,
+                    "depth_height": depth_height,
+                }
 
-                    # Apply false color mapping to the normalized depth
-                    depth_colormap = cv2.applyColorMap(
-                        depth_normalized, cv2.COLORMAP_JET
-                    )
+            # covert to RGB format
+            color_image = frame_to_bgr_image(color_frame)
+            if color_image is None:
+                print("failed to convert frame to image")
+                return False, None
 
-                    # Make depth 0 values visually distinct (e.g., purely black)
-                    # cv2.bitwise_and is much faster than numpy array masking assignment
-                    depth_colormap = cv2.bitwise_and(depth_colormap, depth_colormap, mask=valid_mask)
+            return True, color_image
 
-                    # Resize the depth colormap if its dimensions differ from color_image
-                    if color_image.shape[:2] != depth_colormap.shape[:2]:
-                        depth_colormap = cv2.resize(
-                            # Inter_nearest is faster for simple overlay scaling than Inter_linear
-                            depth_colormap, (color_image.shape[1], color_image.shape[0]), interpolation=cv2.INTER_NEAREST
-                        )
-
-                    # Overlay the depth map on top of the color image using simple alpha blending
-                    alpha = 0.5
-                    color_image = cv2.addWeighted(
-                        color_image, 1 - alpha, depth_colormap, alpha, 0
-                    )
-
-                return True, color_image
-
-            self._video_read = read_orbbec_frame
-            self._frame_size = (1280, 800)
-            self._frame_rate = 30
+        self._video_read = read_orbbec_frame
+        self._frame_size = (1280, 800)
+        self._frame_rate = 30
 
         self._stream = cv2.VideoWriter(
             'appsrc ! timecodestamper ! webrtcsink forward-metas="timecode" name=ws enable-control-data-channel=true',
@@ -269,7 +205,6 @@ class Stream(Node):
         self.create_timer(0.001, self._publish)
 
     def _publish(self):
-        # ret, frame = self._video.read()
         ret, frame = self._video_read()
 
         if not ret:
@@ -292,6 +227,43 @@ class Stream(Node):
                 msg = Float32()
                 msg.data = x_error
                 self._x_error_pub.publish(msg)
+
+        if self._overlay_depth and self._last_depth_data is not None:
+            depth_data = self._last_depth_data
+            depth_width = self._last_depth_frame_info["depth_width"]
+            depth_height = self._last_depth_frame_info["depth_height"]
+
+            # Use OpenCV's built-in mask and minMaxLoc which are C++ optimized
+            valid_mask = cv2.compare(depth_data, 0, cv2.CMP_GT)
+            min_val, max_val, _, _ = cv2.minMaxLoc(depth_data, mask=valid_mask)
+
+            if max_val > 0:
+                self._depth_min_history.append(min_val)
+                self._depth_max_history.append(max_val)
+
+            if len(self._depth_min_history) > 0:
+                avg_min = np.mean(self._depth_min_history)
+                avg_max = np.mean(self._depth_max_history)
+                if avg_max <= avg_min:
+                    avg_max = avg_min + 1
+
+                alpha_scale = 255.0 / (avg_max - avg_min)
+                beta_scale = -avg_min * alpha_scale
+                depth_normalized = cv2.convertScaleAbs(depth_data, alpha=alpha_scale, beta=beta_scale)
+            else:
+                depth_normalized = np.zeros((depth_height, depth_width), dtype=np.uint8)
+
+            depth_colormap = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
+            depth_colormap = cv2.bitwise_and(depth_colormap, depth_colormap, mask=valid_mask)
+
+            if frame.shape[:2] != depth_colormap.shape[:2]:
+                depth_colormap = cv2.resize(
+                    depth_colormap, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST
+                )
+
+            alpha = 0.5
+            frame = cv2.addWeighted(frame, 1 - alpha, depth_colormap, alpha, 0)
+
 
         # Draw actual hit projection
         if self._last_depth_data is not None and self._last_depth_frame_info is not None:
@@ -553,8 +525,8 @@ class Stream(Node):
             self._pump_angle = msg.aux3 * math.radians(32.0)
 
     def shut_down_cv(self):
-        self._video.release()
-        self._stream.release()
+        if self._stream is not None:
+            self._stream.release()
 
 
 def main(args=None):
