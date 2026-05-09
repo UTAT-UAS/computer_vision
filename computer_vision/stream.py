@@ -82,7 +82,7 @@ class Stream(Node):
             self._model = None
 
         self.create_subscription(ManualControlSetpoint, '/fmu/out/manual_control_setpoint', self._servo_callback, qos_profile_sensor_data)
-        self.create_subscription(ManualControlSetpoint, '/fmu/in/manual_control_input', self._servo_callback, qos_profile_sensor_data)
+        # self.create_subscription(ManualControlSetpoint, '/fmu/in/manual_control_input', self._servo_callback, qos_profile_sensor_data)
 
         self._x_error_pub = self.create_publisher(Float32, '/uas/cv/x_error', 10)
 
@@ -300,7 +300,7 @@ class Stream(Node):
 
             # Collect depth pixels and extract 3D coords
             pts_3d_raw = []
-            pixel_coords = []
+            pixel_coords: list[tuple[int, int]] = []
             for y in range(depth_h):
                 for x in range(x_start, x_end):
                     d_val = depth_data[y, x]
@@ -324,62 +324,36 @@ class Stream(Node):
                 
                 pts_ned = np.column_stack((n_pt, e_pt, d_pt))
 
-                # Gradient descent approximation for closest point on water path
-                t_m = 5.0  # Start ~5m out
-                step = 3.0 # Initial search step size in meters
-
-                pump_offset_n = pump_n + nozzle_length * cos_pump
+                # Calc min dists
+                t_vals = np.linspace(0.0, 8.0, 150) # up to 8s
                 pump_offset_d = pump_d - nozzle_length * sin_pump
-
-                for _ in range(10):
-                    if step < 0.05:  # Early termination
-                        break
-                        
-                    t_cands = [max(0.0, t_m - step), t_m, t_m + step]
-                    min_dists = []
-                    
-                    # Evaluate trajectory points
-                    for t in t_cands:
-                        dx = v_0 * t * math.cos(self._pump_angle)
-                        dz = -v_0 * t * math.sin(self._pump_angle) + 0.5 * 9.8 * (t**2)
-                        pn = pump_n + nozzle_length * math.cos(self._pump_angle) + dx
-                        pe = pump_e
-                        pd = pump_offset_d + dz
-                        
-                        pt_traj = np.array([pn, pe, pd])
-                        # Distance to all points
-                        dist = np.min(np.linalg.norm(pts_ned - pt_traj, axis=1))
-                        min_dists.append(dist)
-                    
-                    # Update t_m to the best candidate
-                    best_idx = np.argmin(min_dists)
-                    t_m = t_cands[best_idx]
-                    
-                    # Reduce step size for next iteration
-                    step *= 0.5
+                pn_traj = pump_n + nozzle_length * cos_pump + v_0 * t_vals * cos_pump
+                pe_traj = np.full_like(t_vals, pump_e)
+                pd_traj = pump_offset_d - v_0 * t_vals * sin_pump + 0.5 * 9.8 * (t_vals**2)
                 
-                # Find all points within threshold using the final best t_m
-                dx = v_0 * t_m * math.cos(self._pump_angle)
-                dz = -v_0 * t_m * math.sin(self._pump_angle) + 0.5 * 9.8 * (t_m**2)
-                pn = pump_n + nozzle_length * math.cos(self._pump_angle) + dx
-                pe = pump_e
-                pd = pump_d - nozzle_length * math.sin(self._pump_angle) + dz
-                best_traj_pt = np.array([pn, pe, pd])
+                traj_pts = np.column_stack((pn_traj, pe_traj, pd_traj))
                 
-                dists = np.linalg.norm(pts_ned - best_traj_pt, axis=1)
-                num_points = min(10, len(dists))
-                valid_indices = np.argsort(dists)[:num_points]
+                # Compute distance matrix between all target pixels and trajectory points
+                from scipy.spatial.distance import cdist
+                dists = cdist(pts_ned, traj_pts)
                 
-                scale_x = width / depth_w
-                scale_y = height / depth_h
-                for idx in valid_indices:
-                    x, y = pixel_coords[idx]
+                # Find the absolute minimum distance in the distance matrix
+                min_idx_pts, min_idx_traj = np.unravel_index(np.argmin(dists), dists.shape)
+                min_dist = dists[min_idx_pts, min_idx_traj]
+                
+                # Check if it actually hit nearby
+                hit_threshold = 0.3  # meters
+                if min_dist < hit_threshold:
+                    scale_x = width / depth_w
+                    scale_y = height / depth_h
+                    
+                    x, y = pixel_coords[min_idx_pts]
                     c_x = int(x * scale_x)
                     c_y = int(y * scale_y)
                     matched_pixels.append((c_x, c_y))
             
             for (cx, cy) in matched_pixels:
-                cv2.drawMarker(frame, (cx, cy), (255, 255, 0), cv2.MARKER_CROSS, 10, 1)
+                cv2.drawMarker(frame, (cx, cy), (255, 255, 0), cv2.MARKER_CROSS, 10, 3)
 
         # Crosshair parameters
         crosshair_length = 20
