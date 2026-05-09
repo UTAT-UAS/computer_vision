@@ -82,8 +82,9 @@ class Stream(Node):
             print(f"Failed to load YOLO engine: {e}")
             self._model = None
 
-        # self.create_subscription(ManualControlSetpoint, '/fmu/out/manual_control_setpoint', self._servo_callback, qos_profile_sensor_data)
-        self.create_subscription(ManualControlSetpoint, '/fmu/in/manual_control_input', self._servo_callback, qos_profile_sensor_data)
+        self.create_subscription(ManualControlSetpoint, '/fmu/out/manual_control_setpoint', self._servo_callback, qos_profile_sensor_data)
+        # DEBUG
+        # self.create_subscription(ManualControlSetpoint, '/fmu/in/manual_control_input', self._servo_callback, qos_profile_sensor_data)
 
         self._x_error_pub = self.create_publisher(Float32, '/uas/cv/x_error', 10)
         self._target_pos_pub = self.create_publisher(Polygon, '/uas/cv/position', 10)
@@ -304,6 +305,7 @@ class Stream(Node):
                         target_d = pt_y * cos_cam_pitch - pt_z * sin_cam_pitch + cam_d
                         
                         best_angle = self._auto_target(target_n, target_d)
+                        self._last_best_angle = best_angle
                         msg = Int32()
                         msg.data = int(math.degrees(best_angle))
                         self._servo_angle_pub.publish(msg)
@@ -369,9 +371,16 @@ class Stream(Node):
             # Precompute trigonometric constants
             cos_cam_pitch = math.cos(cam_pitch)
             sin_cam_pitch = math.sin(cam_pitch)
-            cos_pump = math.cos(self._pump_angle)
-            sin_pump = math.sin(self._pump_angle)
-            tan_pump = math.tan(self._pump_angle)
+            
+            target_pump_angle = self._pump_angle
+            if self._auto_target_enabled and getattr(self, '_last_best_angle', None) is not None:
+                target_pump_angle = self._last_best_angle
+            elif not self._auto_target_enabled:
+                self._last_best_angle = None
+                
+            cos_pump = math.cos(target_pump_angle)
+            sin_pump = math.sin(target_pump_angle)
+            tan_pump = math.tan(target_pump_angle)
 
             # Target pixels: 4 pixels wide slice at center
             slice_w = 4
@@ -435,8 +444,9 @@ class Stream(Node):
                 else:
                     matched_pixels.append((c_x, c_y, (0, 0, 255)))
             
+            marker_type = cv2.MARKER_STAR if self._auto_target_enabled else cv2.MARKER_CROSS
             for (cx, cy, color) in matched_pixels:
-                cv2.drawMarker(frame, (cx, cy), color, cv2.MARKER_CROSS, 10, 3)
+                cv2.drawMarker(frame, (cx, cy), color, marker_type, 10, 3)
 
         # Crosshair parameters
         crosshair_length = 20
