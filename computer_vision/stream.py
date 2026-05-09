@@ -6,6 +6,7 @@ from collections import deque
 from flight_stack_msgs.srv import SaveFrame, CalculateDistance
 from std_srvs.srv import SetBool
 from std_msgs.msg import Float32
+from geometry_msgs.msg import Point32, Polygon
 from px4_msgs.msg import ManualControlSetpoint
 from ultralytics import YOLO
 
@@ -46,7 +47,7 @@ class Stream(Node):
         self.declare_parameter("pump_pos_d", 0.15)
         
         self.declare_parameter("nozzle_length", 0.05)
-        self.declare_parameter("v_0", 10.0)
+        self.declare_parameter("v_0", 15.0)
         self.declare_parameter("dist_threshold", 150.0)
         
         self.frame = 0
@@ -81,10 +82,11 @@ class Stream(Node):
             print(f"Failed to load YOLO engine: {e}")
             self._model = None
 
-        self.create_subscription(ManualControlSetpoint, '/fmu/out/manual_control_setpoint', self._servo_callback, qos_profile_sensor_data)
-        # self.create_subscription(ManualControlSetpoint, '/fmu/in/manual_control_input', self._servo_callback, qos_profile_sensor_data)
+        # self.create_subscription(ManualControlSetpoint, '/fmu/out/manual_control_setpoint', self._servo_callback, qos_profile_sensor_data)
+        self.create_subscription(ManualControlSetpoint, '/fmu/in/manual_control_input', self._servo_callback, qos_profile_sensor_data)
 
         self._x_error_pub = self.create_publisher(Float32, '/uas/cv/x_error', 10)
+        self._target_pos_pub = self.create_publisher(Polygon, '/uas/cv/position', 10)
 
         self.create_service(
             CalculateDistance, "/uas/cv/calculate_distance", self._distance_callback
@@ -219,14 +221,59 @@ class Stream(Node):
             results = list(self._model(frame, conf=0.4, stream=True, verbose=False))
             frame = results[0].plot()
             if len(results[0].boxes) > 0:
-                box = results[0].boxes[0]
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                best_box = max(results[0].boxes, key=lambda b: float(b.conf[0]))
+                x1, y1, x2, y2 = best_box.xyxy[0].cpu().numpy()
                 obj_center_x = (x1 + x2) / 2.0
+                obj_center_y = (y1 + y2) / 2.0
                 x_error = float(obj_center_x - center_x)
                 
                 msg = Float32()
                 msg.data = x_error
                 self._x_error_pub.publish(msg)
+
+                if self._last_depth_data is not None and self._last_depth_frame_info is not None:
+                    depth_w = self._last_depth_frame_info["depth_width"]
+                    depth_h = self._last_depth_frame_info["depth_height"]
+                    scale_x = depth_w / width
+                    scale_y = depth_h / height
+                    depth_cx = int(obj_center_x * scale_x)
+                    depth_cy = int(obj_center_y * scale_y)
+                    
+                    frame_data = {
+                        "depth_data": self._last_depth_data,
+                        "depth_intrinsics": self._last_depth_frame_info["depth_intrinsics"],
+                        "extrinsic": self._last_depth_frame_info["extrinsic"],
+                        "depth_width": depth_w,
+                        "depth_height": depth_h,
+                    }
+                    pt_3d = self._get_3d_point(depth_cx, depth_cy, frame_data)
+                    
+                    pts_2d = [
+                        (obj_center_x, obj_center_y),
+                        (x1, y1),  # top-left
+                        (x2, y1),  # top-right
+                        (x2, y2),  # bottom-right
+                        (x1, y2)   # bottom-left
+                    ]
+                    
+                    poly_msg = Polygon()
+                    for px, py in pts_2d:
+                        dcx = int(px * scale_x)
+                        dcy = int(py * scale_y)
+                        pt = self._get_3d_point(dcx, dcy, frame_data)
+                        
+                        p32 = Point32()
+                        if pt is not None:
+                            p32.x = pt.x / 1000.0
+                            p32.y = pt.y / 1000.0
+                            p32.z = pt.z / 1000.0
+                        else:
+                            p32.x = float('nan')
+                            p32.y = float('nan')
+                            p32.z = float('nan')
+                        poly_msg.points.append(p32)
+                        
+                    self._target_pos_pub.publish(poly_msg)
 
         if self._overlay_depth and self._last_depth_data is not None:
             depth_data = self._last_depth_data
