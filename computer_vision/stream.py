@@ -37,7 +37,7 @@ class Stream(Node):
     def __init__(self):
         super().__init__("Stream")
 
-        self.declare_parameter("cam_pos_n", 0.26)
+        self.declare_parameter("cam_pos_n", 0.22)
         self.declare_parameter("cam_pos_e", 0.0)
         self.declare_parameter("cam_pos_d", 0.055)
         self.declare_parameter("cam_pitch", 0.0)
@@ -47,8 +47,8 @@ class Stream(Node):
         self.declare_parameter("pump_pos_d", 0.15)
         
         self.declare_parameter("nozzle_length", 0.05)
-        self.declare_parameter("v_0", 15.0)
-        self.declare_parameter("dist_threshold", 150.0)
+        self.declare_parameter("v_0", 13.0)
+        self.declare_parameter("dist_threshold", 0.3) # m
         
         self.frame = 0
 
@@ -71,10 +71,10 @@ class Stream(Node):
         model_path = ""
         if torch.cuda.is_available():
             print("CUDA is available. Attempting to load TensorRT engine.")
-            model_path = os.path.join(os.path.dirname(__file__), "./best.engine")
+            model_path = os.path.join(os.path.dirname(__file__), "./beta.engine")
         else:
             print("CUDA not available. Loading standard PyTorch model.")
-            model_path = os.path.join(os.path.dirname(__file__), "./best.pt")
+            model_path = os.path.join(os.path.dirname(__file__), "./beta.pt")
         try:
             # TensorRT models (.engine) natively run on the GPU they were compiled for.
             self._model = YOLO(model_path, task='detect')
@@ -354,7 +354,7 @@ class Stream(Node):
             nozzle_length = self.get_parameter("nozzle_length").value
             
             v_0 = self.get_parameter("v_0").value
-            dist_threshold = self.get_parameter("dist_threshold").value
+            dist_threshold = self.get_parameter("dist_threshold").value # m
 
             # Precompute trigonometric constants
             cos_cam_pitch = math.cos(cam_pitch)
@@ -365,7 +365,7 @@ class Stream(Node):
 
             # Target pixels: 4 pixels wide slice at center
             slice_w = 4
-            x_start = max(0, (depth_w // 2) - (slice_w // 2))
+            x_start = max(0, (depth_w // 2) - (slice_w // 2) - 40)
             x_end = min(depth_w, x_start + slice_w)
 
             # Collect depth pixels and extract 3D coords
@@ -412,8 +412,7 @@ class Stream(Node):
                 min_dist = dists[min_idx_pts, min_idx_traj]
                 
                 # Check if it actually hit nearby
-                hit_threshold = 0.3  # meters
-                if min_dist < hit_threshold:
+                if min_dist < dist_threshold:
                     scale_x = width / depth_w
                     scale_y = height / depth_h
                     
