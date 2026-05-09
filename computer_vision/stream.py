@@ -47,7 +47,7 @@ class Stream(Node):
         self.declare_parameter("pump_pos_d", 0.15)
         
         self.declare_parameter("nozzle_length", 0.05)
-        self.declare_parameter("v_0", 13.0)
+        self.declare_parameter("v_0", 11.0)
         self.declare_parameter("dist_threshold", 0.3) # m
         
         self.frame = 0
@@ -367,12 +367,13 @@ class Stream(Node):
             slice_w = 4
             x_start = max(0, (depth_w // 2) - (slice_w // 2) - 40)
             x_end = min(depth_w, x_start + slice_w)
+            subsample_step = 4
 
             # Collect depth pixels and extract 3D coords
             pts_3d_raw = []
             pixel_coords: list[tuple[int, int]] = []
-            for y in range(depth_h):
-                for x in range(x_start, x_end):
+            for y in range(0, depth_h, subsample_step):
+                for x in range(x_start, x_end, subsample_step):
                     d_val = depth_data[y, x]
                     if d_val > 0:
                         pt_3d = transformation2dto3d(OBPoint2f(float(x), float(y)), float(d_val), intrinsics, extrinsic)
@@ -412,17 +413,20 @@ class Stream(Node):
                 min_dist = dists[min_idx_pts, min_idx_traj]
                 
                 # Check if it actually hit nearby
+                scale_x = width / depth_w
+                scale_y = height / depth_h
+                
+                px, py = pixel_coords[min_idx_pts]
+                c_x = int(px * scale_x)
+                c_y = int(py * scale_y)
+                
                 if min_dist < dist_threshold:
-                    scale_x = width / depth_w
-                    scale_y = height / depth_h
-                    
-                    x, y = pixel_coords[min_idx_pts]
-                    c_x = int(x * scale_x)
-                    c_y = int(y * scale_y)
-                    matched_pixels.append((c_x, c_y))
+                    matched_pixels.append((c_x, c_y, (255, 255, 0)))
+                else:
+                    matched_pixels.append((c_x, c_y, (0, 0, 255)))
             
-            for (cx, cy) in matched_pixels:
-                cv2.drawMarker(frame, (cx, cy), (255, 255, 0), cv2.MARKER_CROSS, 10, 3)
+            for (cx, cy, color) in matched_pixels:
+                cv2.drawMarker(frame, (cx, cy), color, cv2.MARKER_CROSS, 10, 3)
 
         # Crosshair parameters
         crosshair_length = 20
