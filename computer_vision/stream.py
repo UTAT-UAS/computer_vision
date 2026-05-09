@@ -210,6 +210,16 @@ class Stream(Node):
 
         self.create_timer(0.001, self._publish)
 
+        # Initialize inverse kinematics solver
+        nozzle_length = self.get_parameter("nozzle_length").value
+        v_0 = self.get_parameter("v_0").value
+        self._ik_solver = InverseKinematics(
+            LINK0=np.array([nozzle_length, 0.0]),
+            NOZZLE_V=v_0,
+            NOZZLE_A=0.0,
+            traj=None
+        )
+
     def _publish(self):
         ret, frame = self._video_read()
 
@@ -574,31 +584,21 @@ class Stream(Node):
         return response
 
     def _auto_target(self, target_n, target_d):
-        best_angle = self._pump_angle
-        min_dist = float('inf')
-        
         pump_n = self.get_parameter("pump_pos_n").value
         pump_d = self.get_parameter("pump_pos_d").value
-        nozzle_length = self.get_parameter("nozzle_length").value
-        v_0 = self.get_parameter("v_0").value
-        
-        for deg in np.linspace(-32.0, 32.0, 150):
-            theta = math.radians(deg)
-            cos_theta = math.cos(theta)
-            sin_theta = math.sin(theta)
-            
-            if cos_theta == 0: continue
-            
-            t = (target_n - pump_n - nozzle_length * cos_theta) / (v_0 * cos_theta)
-            if t < 0: continue
-            
-            pd_traj = pump_d - nozzle_length * sin_theta - v_0 * t * sin_theta + 0.5 * 9.8 * t**2
-            
-            dist = abs(pd_traj - target_d)
-            if dist < min_dist:
-                min_dist = dist
-                best_angle = theta
-                
+
+        start_pos = np.array([pump_n, pump_d])
+        target_pos = np.array([target_n, target_d])
+
+        angles = self._ik_solver.solve_ideal(start_pos, target_pos)
+
+        if not angles:
+            # No solution found, return current angle
+            return self._pump_angle
+
+        # Choose the angle closest to the current pump angle
+        best_angle = min(angles, key=lambda a: abs(a - self._pump_angle))
+
         return best_angle
 
     def _servo_callback(self, msg: ManualControlSetpoint):
@@ -608,6 +608,52 @@ class Stream(Node):
     def shut_down_cv(self):
         if self._stream is not None:
             self._stream.release()
+
+
+class InverseKinematics():
+    """
+    1DOF model of fixed arm0 from starting point, a revolute joint, and end effector
+    Approximate when link1 is negligible
+    """
+    def __init__(self, LINK0: np.ndarray, NOZZLE_V: float, NOZZLE_A: float, traj):
+        super().__init__()
+        self.traj = traj
+        self.LINK0 = LINK0
+        self.LINK0_A = math.atan2(self.LINK0[1], self.LINK0[0])
+        self.NOZZLE_V = NOZZLE_V
+        self.NOZZLE_A = NOZZLE_A
+
+    def solve_ideal(self, start_pos: np.ndarray, target_pos: np.ndarray):
+        """
+        Explicit solver assuming ideal trajectory
+
+        :param start_pos: relative position of revolute joint (position of LINK0's end NOT its start)
+        :param target_pos: relative position of target
+
+        :return: list of angles (relative to link, and offset by NOZZLE_A)
+        """
+        x = target_pos[0] - start_pos[0]
+        y = target_pos[1] - start_pos[1]
+
+        a = -4.905 * (x*x) / (self.NOZZLE_V*self.NOZZLE_V)
+        b = x
+        c = a - y
+        det = b*b - 4 * a * c
+        print(det)
+
+        if abs(det) < 0.001:  # approximately 0
+            theta0 = math.atan2(-b, 2 * a)
+            return [theta0 - self.NOZZLE_A - self.LINK0_A]
+        elif det < 0:  # unreachable
+            return []
+        else:  # 2 solutions
+            det_root = det ** 0.5
+            denom = 2 * a
+
+            theta0 = math.atan2(-b + det_root, denom)
+            theta1 = math.atan2(-b - det_root, denom)
+
+            return [theta0 - self.NOZZLE_A - self.LINK0_A, theta1 - self.NOZZLE_A - self.LINK0_A]
 
 
 def main(args=None):
