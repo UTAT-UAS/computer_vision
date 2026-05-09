@@ -5,7 +5,7 @@ import math
 from collections import deque
 from flight_stack_msgs.srv import SaveFrame, CalculateDistance
 from std_srvs.srv import SetBool
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, Int32
 from geometry_msgs.msg import Point32, Polygon
 from px4_msgs.msg import ManualControlSetpoint
 from ultralytics import YOLO
@@ -87,12 +87,16 @@ class Stream(Node):
 
         self._x_error_pub = self.create_publisher(Float32, '/uas/cv/x_error', 10)
         self._target_pos_pub = self.create_publisher(Polygon, '/uas/cv/position', 10)
+        self._servo_angle_pub = self.create_publisher(Int32, '/set_servo_angle', 10)
 
         self.create_service(
             CalculateDistance, "/uas/cv/calculate_distance", self._distance_callback
         )
         self.create_service(SaveFrame, "/uas/cv/save_frame", self._save_frame_callback)
         self.create_service(SetBool, "/uas/cv/toggle_overlay_depth", self._toggle_overlay_callback)
+        
+        self._auto_target_enabled = False
+        self.create_service(SetBool, "/uas/cv/toggle_auto_target", self._toggle_auto_target_callback)
 
         config = Config()
         pipeline = Pipeline()
@@ -274,6 +278,25 @@ class Stream(Node):
                         poly_msg.points.append(p32)
                         
                     self._target_pos_pub.publish(poly_msg)
+
+                    if self._auto_target_enabled and pt_3d is not None:
+                        cam_n = self.get_parameter("cam_pos_n").value
+                        cam_d = self.get_parameter("cam_pos_d").value
+                        cam_pitch = self.get_parameter("cam_pitch").value
+                        
+                        pt_y = pt_3d.y / 1000.0
+                        pt_z = pt_3d.z / 1000.0
+                        
+                        cos_cam_pitch = math.cos(cam_pitch)
+                        sin_cam_pitch = math.sin(cam_pitch)
+                        
+                        target_n = pt_z * cos_cam_pitch + pt_y * sin_cam_pitch + cam_n
+                        target_d = pt_y * cos_cam_pitch - pt_z * sin_cam_pitch + cam_d
+                        
+                        best_angle = self._auto_target(target_n, target_d)
+                        msg = Int32()
+                        msg.data = int(math.degrees(best_angle))
+                        self._servo_angle_pub.publish(msg)
 
         if self._overlay_depth and self._last_depth_data is not None:
             depth_data = self._last_depth_data
@@ -540,6 +563,40 @@ class Stream(Node):
         response.success = True
         response.message = f"Depth overlay set to {self._overlay_depth}"
         return response
+
+    def _toggle_auto_target_callback(self, request, response):
+        self._auto_target_enabled = request.data
+        response.success = True
+        response.message = f"Auto target set to {self._auto_target_enabled}"
+        return response
+
+    def _auto_target(self, target_n, target_d):
+        best_angle = self._pump_angle
+        min_dist = float('inf')
+        
+        pump_n = self.get_parameter("pump_pos_n").value
+        pump_d = self.get_parameter("pump_pos_d").value
+        nozzle_length = self.get_parameter("nozzle_length").value
+        v_0 = self.get_parameter("v_0").value
+        
+        for deg in np.linspace(-32.0, 32.0, 150):
+            theta = math.radians(deg)
+            cos_theta = math.cos(theta)
+            sin_theta = math.sin(theta)
+            
+            if cos_theta == 0: continue
+            
+            t = (target_n - pump_n - nozzle_length * cos_theta) / (v_0 * cos_theta)
+            if t < 0: continue
+            
+            pd_traj = pump_d - nozzle_length * sin_theta - v_0 * t * sin_theta + 0.5 * 9.8 * t**2
+            
+            dist = abs(pd_traj - target_d)
+            if dist < min_dist:
+                min_dist = dist
+                best_angle = theta
+                
+        return best_angle
 
     def _servo_callback(self, msg: ManualControlSetpoint):
         if not math.isnan(msg.aux3):
