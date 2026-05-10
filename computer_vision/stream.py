@@ -217,7 +217,7 @@ class Stream(Node):
         self._ik_solver = InverseKinematics(
             LINK0=np.array([nozzle_length, 0.0]),
             NOZZLE_V=v_0,
-            NOZZLE_A=0.0,
+            NOZZLE_A=math.pi,
             traj=None
         )
 
@@ -637,6 +637,15 @@ class InverseKinematics():
         self.NOZZLE_V = NOZZLE_V
         self.NOZZLE_A = NOZZLE_A
 
+    @staticmethod
+    def _normalize_angle(angle: float) -> float:
+        """Normalize angle to [-π, π] range."""
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+
     def solve_ideal(self, start_pos: np.ndarray, target_pos: np.ndarray):
         """
         Explicit solver assuming ideal trajectory
@@ -657,7 +666,7 @@ class InverseKinematics():
 
         if abs(det) < 0.001:  # approximately 0
             theta0 = math.atan2(-b, 2 * a)
-            return [theta0 - self.NOZZLE_A - self.LINK0_A]
+            return [self._normalize_angle(theta0 - self.NOZZLE_A - self.LINK0_A)]
         elif det < 0:  # unreachable
             return []
         else:  # 2 solutions
@@ -667,7 +676,8 @@ class InverseKinematics():
             theta0 = math.atan2(-b + det_root, denom)
             theta1 = math.atan2(-b - det_root, denom)
 
-            return [theta0 - self.NOZZLE_A - self.LINK0_A, theta1 - self.NOZZLE_A - self.LINK0_A]
+            return [self._normalize_angle(theta0 - self.NOZZLE_A - self.LINK0_A),
+                    self._normalize_angle(theta1 - self.NOZZLE_A - self.LINK0_A)]
 
 
 def main(args=None):
