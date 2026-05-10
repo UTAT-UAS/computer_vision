@@ -689,7 +689,7 @@ class InverseKinematics():
 
         if abs(det) < 0.001:  # approximately 0
             theta0 = math.atan2(-b, 2 * a)
-            return [self._normalize_angle(theta0 - self.NOZZLE_A - self.LINK0_A)]
+            return [-self._normalize_angle(theta0 - self.NOZZLE_A - self.LINK0_A)]
         elif det < 0:  # unreachable
             return []
         else:  # 2 solutions
@@ -699,8 +699,8 @@ class InverseKinematics():
             theta0 = math.atan2(-b + det_root, denom)
             theta1 = math.atan2(-b - det_root, denom)
 
-            return [self._normalize_angle(theta0 - self.NOZZLE_A - self.LINK0_A),
-                    self._normalize_angle(theta1 - self.NOZZLE_A - self.LINK0_A)]
+            return [-self._normalize_angle(theta0 - self.NOZZLE_A - self.LINK0_A),
+                    -self._normalize_angle(theta1 - self.NOZZLE_A - self.LINK0_A)]
 
 
 def main(args=None):
