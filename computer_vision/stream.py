@@ -217,7 +217,7 @@ class Stream(Node):
         self._ik_solver = InverseKinematics(
             LINK0=np.array([nozzle_length, 0.0]),
             NOZZLE_V=v_0,
-            NOZZLE_A=math.pi,
+            NOZZLE_A=0,
             traj=None
         )
 
@@ -679,7 +679,7 @@ class InverseKinematics():
         :return: list of angles (relative to link, and offset by NOZZLE_A)
         """
         x = target_pos[0] - start_pos[0]
-        y = target_pos[1] - start_pos[1]
+        y = -(target_pos[1] - start_pos[1])
 
         a = -4.905 * (x*x) / (self.NOZZLE_V*self.NOZZLE_V)
         b = x
@@ -696,11 +696,11 @@ class InverseKinematics():
             det_root = det ** 0.5
             denom = 2 * a
 
-            theta0 = math.atan2(-b + det_root, denom)
-            theta1 = math.atan2(-b - det_root, denom)
+            theta0 = math.atan((-b + det_root) / denom)
+            theta1 = math.atan((-b - det_root) / denom)
 
-            return [-self._normalize_angle(theta0 - self.NOZZLE_A - self.LINK0_A),
-                    -self._normalize_angle(theta1 - self.NOZZLE_A - self.LINK0_A)]
+            return [theta0 - self.NOZZLE_A - self.LINK0_A,
+                    theta1 - self.NOZZLE_A - self.LINK0_A]
 
 
 def main(args=None):
