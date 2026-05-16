@@ -525,7 +525,7 @@ class Stream(Node):
                 "depth_width": self._last_depth_frame_info["depth_width"],
                 "depth_height": self._last_depth_frame_info["depth_height"],
             }
-            if len(self._frame_buffer) > 1000:
+            if len(self._frame_buffer) > 300:
                 oldest_key = min(self._frame_buffer.keys())
                 del self._frame_buffer[oldest_key]
 
@@ -575,6 +575,9 @@ class Stream(Node):
 
     def _save_frame_callback(self, request, response):
         target_frame = request.frame_id
+        if target_frame == 0:
+            if len(self._frame_buffer) > 0:
+                target_frame = max(self._frame_buffer.keys())
 
         if target_frame in self._frame_buffer:
             self._saved_frames[target_frame] = self._frame_buffer[target_frame]
@@ -639,7 +642,7 @@ class Stream(Node):
     def _upload_task(self, color_frame, target_frame):
         _, buffer = cv2.imencode('.jpg', color_frame)
         file_bytes = buffer.tobytes()
-        filename = f"frame_{target_frame}.jpg"
+        filename = f"Task_2_UTAT_target_AUTO{target_frame}.jpg"
         
         discord_webhook = self.get_parameter("discord_webhook").value
         drive_folder_id = self.get_parameter("drive_folder_id").value
@@ -651,6 +654,9 @@ class Stream(Node):
 
     def _upload_frame_callback(self, request, response):
         target_frame = request.frame_id
+        if target_frame == 0:
+            if len(self._frame_buffer) > 0:
+                target_frame = max(self._frame_buffer.keys())
         
         if target_frame in self._frame_buffer:
             frame_data = self._frame_buffer[target_frame]
