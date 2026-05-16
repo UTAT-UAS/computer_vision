@@ -226,7 +226,44 @@ class Stream(Node):
             results = list(self._model(frame, conf=0.4, stream=True, verbose=False))
             frame = results[0].plot()
             if len(results[0].boxes) > 0:
-                best_box = max(results[0].boxes, key=lambda b: float(b.conf[0]))
+                frame_data = None
+                scale_x, scale_y = 1.0, 1.0
+                if self._last_depth_data is not None and self._last_depth_frame_info is not None:
+                    depth_w = self._last_depth_frame_info["depth_width"]
+                    depth_h = self._last_depth_frame_info["depth_height"]
+                    scale_x = depth_w / width
+                    scale_y = depth_h / height
+                    frame_data = {
+                        "depth_data": self._last_depth_data,
+                        "depth_intrinsics": self._last_depth_frame_info["depth_intrinsics"],
+                        "extrinsic": self._last_depth_frame_info["extrinsic"],
+                        "depth_width": depth_w,
+                        "depth_height": depth_h,
+                    }
+
+                best_box = None
+                best_pt_3d = None
+                boxes_with_3d = []
+
+                if frame_data is not None:
+                    for b in results[0].boxes:
+                        x1_b, y1_b, x2_b, y2_b = b.xyxy[0].cpu().numpy()
+                        cx = (x1_b + x2_b) / 2.0
+                        cy = (y1_b + y2_b) / 2.0
+                        
+                        pt_3d = self._get_3d_point(int(cx * scale_x), int(cy * scale_y), frame_data)
+                        if pt_3d is not None:
+                            dist = pt_3d.x**2 + pt_3d.y**2 + pt_3d.z**2
+                            boxes_with_3d.append((b, pt_3d, dist))
+
+                if boxes_with_3d:
+                    best_match = min(boxes_with_3d, key=lambda x: x[2])
+                    best_box = best_match[0]
+                    best_pt_3d = best_match[1]
+                else:
+                    best_box = max(results[0].boxes, key=lambda b: float(b.conf[0]))
+                    best_pt_3d = None
+
                 x1, y1, x2, y2 = best_box.xyxy[0].cpu().numpy()
                 obj_center_x = (x1 + x2) / 2.0
                 obj_center_y = (y1 + y2) / 2.0
@@ -236,22 +273,8 @@ class Stream(Node):
                 msg.data = x_error + 40.0
                 self._x_error_pub.publish(msg)
 
-                if self._last_depth_data is not None and self._last_depth_frame_info is not None:
-                    depth_w = self._last_depth_frame_info["depth_width"]
-                    depth_h = self._last_depth_frame_info["depth_height"]
-                    scale_x = depth_w / width
-                    scale_y = depth_h / height
-                    depth_cx = int(obj_center_x * scale_x)
-                    depth_cy = int(obj_center_y * scale_y)
-                    
-                    frame_data = {
-                        "depth_data": self._last_depth_data,
-                        "depth_intrinsics": self._last_depth_frame_info["depth_intrinsics"],
-                        "extrinsic": self._last_depth_frame_info["extrinsic"],
-                        "depth_width": depth_w,
-                        "depth_height": depth_h,
-                    }
-                    pt_3d = self._get_3d_point(depth_cx, depth_cy, frame_data)
+                if frame_data is not None:
+                    pt_3d = best_pt_3d
                     
                     pts_2d = [
                         (obj_center_x, obj_center_y),
