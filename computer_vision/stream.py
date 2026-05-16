@@ -13,10 +13,19 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 import torch
+import requests
+import io
+import threading
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+
+from google.oauth2.credentials import Credentials
+from google.oauth2 import service_account
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 
 from pyorbbecsdk import (  # pylint: disable=no-name-in-module
     Config,
@@ -49,6 +58,9 @@ class Stream(Node):
         self.declare_parameter("nozzle_length", 0.05)
         self.declare_parameter("v_0", 11.0)
         self.declare_parameter("dist_threshold", 0.3) # m
+        
+        self.declare_parameter("discord_webhook", "")
+        self.declare_parameter("drive_folder_id", "")
         
         self.frame = 0
 
@@ -94,6 +106,7 @@ class Stream(Node):
             CalculateDistance, "/uas/cv/calculate_distance", self._distance_callback
         )
         self.create_service(SaveFrame, "/uas/cv/save_frame", self._save_frame_callback)
+        self.create_service(SaveFrame, "/uas/cv/upload_frame", self._upload_frame_callback)
         self.create_service(SetBool, "/uas/cv/toggle_overlay_depth", self._toggle_overlay_callback)
         
         self._auto_target_enabled = False
@@ -218,12 +231,16 @@ class Stream(Node):
             print("Failed to grab frame.")
             return
 
+        # Keep original frame reference
+        color_frame = frame
+
         # Draw crosshair at the center
         height, width = frame.shape[:2]
         center_x, center_y = width // 2, height // 2
 
         if self._model is not None:
             results = list(self._model(frame, conf=0.4, stream=True, verbose=False))
+            # Just draw on the plot
             frame = results[0].plot()
             if len(results[0].boxes) > 0:
                 frame_data = None
@@ -491,6 +508,7 @@ class Stream(Node):
             and self._last_depth_frame_info is not None
         ):
             self._frame_buffer[self.frame] = {
+                "color_frame": color_frame,
                 "depth_data": self._last_depth_data,
                 "depth_intrinsics": self._last_depth_frame_info["depth_intrinsics"],
                 "extrinsic": self._last_depth_frame_info["extrinsic"],
@@ -558,6 +576,90 @@ class Stream(Node):
             response.message = f"Frame {target_frame} not found in buffer."
             response.frame_id = target_frame
 
+        return response
+
+    def _upload_to_drive(self, file_bytes, filename, folder_id):
+        try:
+            SCOPES = ['https://www.googleapis.com/auth/drive.file']
+            creds = None
+            
+            # Prefer service account for fully headless operation
+            if os.path.exists('service_account.json'):
+                creds = service_account.Credentials.from_service_account_file('service_account.json', scopes=SCOPES)
+            elif os.path.exists('credentials.json'):
+                try:
+                    creds = service_account.Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
+                except ValueError:
+                    pass # Not a service account file
+                    
+            # Fallback to token.json if already generated
+            if not creds and os.path.exists('token.json'):
+                creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+                if creds and creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+            
+            if not creds or not creds.valid:
+                self.get_logger().error("No valid Drive credentials available. Provide a service_account.json for headless auth.")
+                return False
+                
+            service = build('drive', 'v3', credentials=creds)
+            file_metadata = {'name': filename}
+            if folder_id:
+                file_metadata['parents'] = [folder_id]
+                
+            media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype='image/jpeg', resumable=True)
+            file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            self.get_logger().info(f"Uploaded to drive with ID: {file.get('id')}")
+            return True
+        except Exception as e:
+            self.get_logger().error(f"Failed to upload to drive: {e}")
+            return False
+
+    def _upload_to_discord(self, file_bytes, filename, webhook_url):
+        try:
+            files = {'file': (filename, file_bytes, 'image/jpeg')}
+            response = requests.post(webhook_url, files=files)
+            response.raise_for_status()
+            self.get_logger().info(f"Uploaded to discord webhook")
+            return True
+        except Exception as e:
+            self.get_logger().error(f"Failed to upload to discord: {e}")
+            return False
+
+    def _upload_task(self, color_frame, target_frame):
+        _, buffer = cv2.imencode('.jpg', color_frame)
+        file_bytes = buffer.tobytes()
+        filename = f"frame_{target_frame}.jpg"
+        
+        discord_webhook = self.get_parameter("discord_webhook").value
+        drive_folder_id = self.get_parameter("drive_folder_id").value
+        
+        if discord_webhook:
+            self._upload_to_discord(file_bytes, filename, discord_webhook)
+        if drive_folder_id:
+            self._upload_to_drive(file_bytes, filename, drive_folder_id)
+
+    def _upload_frame_callback(self, request, response):
+        target_frame = request.frame_id
+        
+        if target_frame in self._frame_buffer:
+            frame_data = self._frame_buffer[target_frame]
+            if "color_frame" in frame_data:
+                # Run the upload in a background thread to avoid blocking ROS spin
+                threading.Thread(
+                    target=self._upload_task,
+                    args=(frame_data["color_frame"], target_frame)
+                ).start()
+                response.success = True
+                response.message = f"Upload for frame {target_frame} initiated."
+            else:
+                response.success = False
+                response.message = f"Color frame for {target_frame} not found."
+        else:
+            response.success = False
+            response.message = f"Frame {target_frame} not found in buffer."
+            
+        response.frame_id = target_frame
         return response
 
     def _distance_callback(self, request, response):
