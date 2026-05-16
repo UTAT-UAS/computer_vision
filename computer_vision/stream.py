@@ -233,7 +233,7 @@ class Stream(Node):
                 x_error = float(obj_center_x - center_x)
                 
                 msg = Float32()
-                msg.data = x_error
+                msg.data = x_error + 40.0
                 self._x_error_pub.publish(msg)
 
                 if self._last_depth_data is not None and self._last_depth_frame_info is not None:
