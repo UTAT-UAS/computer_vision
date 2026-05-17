@@ -76,23 +76,27 @@ class Stream(Node):
         self._last_depth_frame_info = None
         self._overlay_depth = "--overlay-depth" in sys.argv
         self._flip = "--flip" in sys.argv
+        self._cv_enabled = "--cv" in sys.argv
+        self._traj_enabled = "--traj" in sys.argv
 
         self._pump_angle = 0
 
         # Load YOLO model
-        model_path = ""
-        if torch.cuda.is_available():
-            print("CUDA is available. Attempting to load TensorRT engine.")
-            model_path = os.path.join(os.path.dirname(__file__), "./beta.engine")
-        else:
-            print("CUDA not available. Loading standard PyTorch model.")
-            model_path = os.path.join(os.path.dirname(__file__), "./beta.pt")
-        try:
-            # TensorRT models (.engine) natively run on the GPU they were compiled for.
-            self._model = YOLO(model_path, task='detect')
-        except Exception as e:
-            print(f"Failed to load YOLO engine: {e}")
-            self._model = None
+        self._model = None
+        if self._cv_enabled:
+            model_path = ""
+            if torch.cuda.is_available():
+                print("CUDA is available. Attempting to load TensorRT engine.")
+                model_path = os.path.join(os.path.dirname(__file__), "./beta.engine")
+            else:
+                print("CUDA not available. Loading standard PyTorch model.")
+                model_path = os.path.join(os.path.dirname(__file__), "./beta.pt")
+            try:
+                # TensorRT models (.engine) natively run on the GPU they were compiled for.
+                self._model = YOLO(model_path, task='detect')
+            except Exception as e:
+                print(f"Failed to load YOLO engine: {e}")
+                self._model = None
 
         self.create_subscription(ManualControlSetpoint, '/fmu/out/manual_control_setpoint', self._servo_callback, qos_profile_sensor_data)
         # DEBUG
@@ -388,7 +392,7 @@ class Stream(Node):
 
 
         # Draw actual hit projection
-        if self._last_depth_data is not None and self._last_depth_frame_info is not None:
+        if self._traj_enabled and self._last_depth_data is not None and self._last_depth_frame_info is not None:
             depth_data = self._last_depth_data
             depth_w = self._last_depth_frame_info["depth_width"]
             depth_h = self._last_depth_frame_info["depth_height"]
