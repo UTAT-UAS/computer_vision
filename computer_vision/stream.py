@@ -115,11 +115,13 @@ class Stream(Node):
         
         self._auto_target_enabled = False
         self.create_service(SetBool, "/uas/cv/toggle_auto_target", self._toggle_auto_target_callback)
+        self.create_service(SetBool, "/uas/cv/toggle_stream", self._toggle_stream_callback)
 
-        config = Config()
-        pipeline = Pipeline()
+        self._config = Config()
+        self._pipeline = Pipeline()
+        self._is_streaming = True
         try:
-            device = pipeline.get_device()
+            device = self._pipeline.get_device()
             if self._flip:
                 try:
                     device.set_int_property(OBPropertyID.OB_PROP_COLOR_ROTATE_INT, 180)
@@ -127,7 +129,7 @@ class Stream(Node):
                 except OBError as e:
                     print("Failed to set rotation properties:", e)
 
-            profile_list = pipeline.get_stream_profile_list(
+            profile_list = self._pipeline.get_stream_profile_list(
                 OBSensorType.COLOR_SENSOR
             )
             try:
@@ -140,10 +142,10 @@ class Stream(Node):
                 print(e)
                 color_profile = profile_list.get_default_video_stream_profile()
             print("color profile: ", color_profile)
-            config.enable_stream(color_profile)
+            self._config.enable_stream(color_profile)
 
             # Enable depth sensor
-            depth_profile_list = pipeline.get_stream_profile_list(
+            depth_profile_list = self._pipeline.get_stream_profile_list(
                 OBSensorType.DEPTH_SENSOR
             )
             try:
@@ -158,15 +160,17 @@ class Stream(Node):
                     depth_profile_list.get_default_video_stream_profile()
                 )
             print("depth profile: ", depth_profile)
-            config.enable_stream(depth_profile)
+            self._config.enable_stream(depth_profile)
 
         except Exception as e:
             print(e)
             return
-        pipeline.start(config)
+        self._pipeline.start(self._config)
 
         def read_orbbec_frame():
-            frames: FrameSet = pipeline.wait_for_frames(1000)
+            if not self._is_streaming:
+                return False, None
+            frames: FrameSet = self._pipeline.wait_for_frames(1000)
             if frames is None:
                 return False, None
             color_frame = frames.get_color_frame()
@@ -239,6 +243,9 @@ class Stream(Node):
         )
 
     def _publish(self):
+        if not self._is_streaming:
+            return
+
         ret, frame = self._video_read()
 
         if not ret:
@@ -726,6 +733,25 @@ class Stream(Node):
         self._auto_target_enabled = request.data
         response.success = True
         response.message = f"Auto target set to {self._auto_target_enabled}"
+        return response
+
+    def _toggle_stream_callback(self, request, response):
+        enable = request.data
+        if enable != self._is_streaming:
+            try:
+                if enable:
+                    self._pipeline.start(self._config)
+                else:
+                    self._pipeline.stop()
+                self._is_streaming = enable
+                response.success = True
+                response.message = f"Stream set to {enable}"
+            except Exception as e:
+                response.success = False
+                response.message = f"Failed to toggle stream: {str(e)}"
+        else:
+            response.success = True
+            response.message = f"Stream already set to {enable}"
         return response
 
     def _auto_target(self, target_n, target_d):
